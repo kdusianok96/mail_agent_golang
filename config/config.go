@@ -30,6 +30,24 @@ type Config struct {
 	DKIMSelector       string   `toml:"DKIMSelector"`
 	DKIMPrivateKeyPath string   `toml:"DKIMPrivateKeyPath"`
 	DKIMHeaders        []string `toml:"DKIMHeaders,omitempty"`
+
+	// Outbound Email Security
+	OutboundSTARTTLSPolicy string `toml:"OutboundSTARTTLSPolicy"` // "opportunistic", "mandatory", "disabled"
+	OutboundTLSVerifyCert  bool   `toml:"OutboundTLSVerifyCert"`  // Default to true
+
+	// Outbound Relay (Smarthost) Configuration
+	OutboundRelayHost     string `toml:"OutboundRelayHost"`     // e.g., "smtp.example.com:587"
+	OutboundRelayUsername string `toml:"OutboundRelayUsername"`
+	OutboundRelayPassword string `toml:"OutboundRelayPassword"`
+	// OutboundRelayAuthMechanism string `toml:"OutboundRelayAuthMechanism"` // Future: "PLAIN", "LOGIN", "CRAM-MD5"
+}
+
+// newConfigWithDefaults creates a Config with default values set before TOML unmarshalling.
+func newConfigWithDefaults() Config {
+	return Config{
+		OutboundTLSVerifyCert: true, // Default to true
+		// Initialize other fields that need non-zero defaults if TOML lib doesn't set them when key is missing
+	}
 }
 
 // LoadConfig reads a TOML configuration file and unmarshals it into a Config struct.
@@ -100,6 +118,27 @@ func LoadConfig(filePath string) (*Config, error) {
 		// }
 	}
 
+	// Validate and set default for OutboundSTARTTLSPolicy
+	policy := strings.ToLower(cfg.OutboundSTARTTLSPolicy)
+	switch policy {
+	case "opportunistic", "mandatory", "disabled":
+		cfg.OutboundSTARTTLSPolicy = policy // Ensure it's stored in lowercase
+	case "":
+		log.Printf("WARN: OutboundSTARTTLSPolicy not set in config, using default: 'opportunistic'.")
+		cfg.OutboundSTARTTLSPolicy = "opportunistic"
+	default:
+		log.Printf("WARN: Invalid OutboundSTARTTLSPolicy '%s' in config, using default: 'opportunistic'.", cfg.OutboundSTARTTLSPolicy)
+		cfg.OutboundSTARTTLSPolicy = "opportunistic"
+	}
+	// Note: OutboundTLSVerifyCert default is handled by newConfigWithDefaults if key is missing.
+	// If key `OutboundTLSVerifyCert = false` is present, it will be false.
+
+	if cfg.OutboundRelayHost != "" {
+		log.Printf("INFO: OutboundRelayHost is configured (%s). All outgoing mail will be sent via this relay.", cfg.OutboundRelayHost)
+		if cfg.OutboundRelayUsername != "" && cfg.OutboundRelayPassword == "" {
+			log.Printf("WARN: OutboundRelayUsername (%s) is set, but OutboundRelayPassword is empty. Relay authentication might fail.", cfg.OutboundRelayUsername)
+		}
+	}
 
 	return &cfg, nil
 }

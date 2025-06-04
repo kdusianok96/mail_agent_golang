@@ -142,7 +142,7 @@ func processQueueDirectory(cfg *config.Config) {
 		}
 		// emailToSend.Data now contains either the original or DKIM-signed data
 
-		err = delivery.SendEmail(&emailToSend) // Send the (potentially signed) email
+		err = delivery.SendEmail(&emailToSend, cfg) // Pass config for outbound policies
 		metadata.LastAttemptTime = time.Now()
 
 		if err == nil {

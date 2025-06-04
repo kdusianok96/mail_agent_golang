@@ -39,6 +39,17 @@ var validateConfigCmd = &cobra.Command{
 		log.Printf("  DKIM Selector: %s", appConfig.DKIMSelector)
 		log.Printf("  DKIM Private Key Path: %s", appConfig.DKIMPrivateKeyPath)
 		log.Printf("  DKIM Headers: %v", appConfig.DKIMHeaders)
+		log.Println("  --- Outbound Email Security ---")
+		log.Printf("  Outbound STARTTLS Policy: %s", appConfig.OutboundSTARTTLSPolicy)
+		log.Printf("  Outbound TLS Verify Cert: %t", appConfig.OutboundTLSVerifyCert)
+		log.Println("  --- Outbound Relay (Smarthost) ---")
+		log.Printf("  Outbound Relay Host: %s", appConfig.OutboundRelayHost)
+		log.Printf("  Outbound Relay Username: %s", appConfig.OutboundRelayUsername)
+		if appConfig.OutboundRelayPassword != "" {
+			log.Println("  Outbound Relay Password: [set]")
+		} else {
+			log.Println("  Outbound Relay Password: [not set]")
+		}
 
 
 		if len(appConfig.Users) > 0 {

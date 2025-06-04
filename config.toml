@@ -48,4 +48,35 @@ DKIMPrivateKeyPath = "/etc/gosmtpd/dkim/private.key" # Path to your DKIM RSA pri
                                                      # Ensure this file is readable by the server process and kept secure.
 # DKIMHeaders = ["From", "To", "Cc", "Subject", "Date", "Message-ID"] # Optional: specific headers to include in the signature.
                                                                      # Most libraries have sensible defaults if this is omitted or empty.
-                                                                     # Over-specifying can sometimes break signatures if headers are modified by intermediate MTAs.
+
+# --- Outbound Email Security ---
+# OutboundSTARTTLSPolicy: Defines if and how STARTTLS is used for outgoing mail sent by this server.
+# Options:
+#   "opportunistic" - (Default) Use STARTTLS if advertised by the remote server. If STARTTLS handshake fails,
+#                     the email will typically be sent in plaintext (current client behavior).
+#   "mandatory"     - Always use STARTTLS. If the remote server doesn't support STARTTLS or the TLS handshake
+#                     fails, the email delivery to that server will fail.
+#   "disabled"      - Never attempt STARTTLS. Send all outgoing mail in plaintext.
+OutboundSTARTTLSPolicy = "opportunistic"
+
+# OutboundTLSVerifyCert: If true (default), the server will verify the certificate of the remote mail server
+# when using STARTTLS for outgoing connections.
+# Setting this to false is highly insecure (disables protection against MITM attacks) and
+# should only be used for specific testing scenarios with trusted networks or self-signed certs.
+OutboundTLSVerifyCert = true
+
+# --- Outbound Relay (Smarthost) Configuration ---
+# If OutboundRelayHost is set (e.g., "smtp.yoursmarthost.com:587"), all outgoing emails
+# will be sent through this relay instead of direct delivery via MX lookup.
+# The port is important (e.g., 587 often implies STARTTLS, 25 for traditional SMTP, 465 for SMTPS/TLS).
+OutboundRelayHost = "" # e.g., "mail.isp.com:587" or "192.168.1.100:25"
+
+# Credentials for the OutboundRelayHost (if it requires authentication).
+# These are used when connecting to your smarthost.
+OutboundRelayUsername = "" # e.g., "your_relay_auth_username"
+OutboundRelayPassword = "" # e.g., "your_relay_auth_password"
+# Note: Storing passwords in plaintext in config files has security implications.
+# Ensure this file has restricted permissions.
+#
+# OutboundRelayAuthMechanism = "" # Optional: Specify "PLAIN", "LOGIN".
+                                # If empty, the client will attempt common mechanisms. (Future enhancement)
