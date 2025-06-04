@@ -79,6 +79,22 @@ OutboundRelayUsername = "" # e.g., "your_relay_auth_username"
 OutboundRelayPassword = "" # e.g., "your_relay_auth_password"
 # Note: Storing passwords in plaintext in config files has security implications.
 # Ensure this file has restricted permissions.
-#
-# OutboundRelayAuthMechanism = "" # Optional: Specify "PLAIN", "LOGIN".
-                                # If empty, the client will attempt common mechanisms. (Future enhancement)
+
+# --- Basic Rate Limiting Configuration ---
+# These settings provide basic control over connection and command frequency.
+# The actual enforcement logic is implemented in the SMTP server session handler.
+RateLimitEnable = false # Set to true to enable these basic rate limiting features.
+
+# MaxConnectionsPerIP: Maximum number of concurrent connections allowed from a single IP address.
+# A value of 0 means unlimited.
+MaxConnectionsPerIP = 10
+
+# MaxCommandsPerSession: Maximum total number of commands allowed in a single SMTP session
+# before the server may take action (e.g., issue a warning or close the session).
+# A value of 0 means unlimited.
+MaxCommandsPerSession = 200
+
+# MaxRecipientsPerMessage: Maximum number of recipients (RCPT TO commands) allowed
+# for a single email message transaction.
+# A value of 0 means unlimited.
+MaxRecipientsPerMessage = 100

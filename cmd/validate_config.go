@@ -51,6 +51,11 @@ var validateConfigCmd = &cobra.Command{
 		} else {
 			log.Println("  Outbound Relay Password: [not set]")
 		}
+		log.Println("  --- Basic Rate Limiting ---")
+		log.Printf("  Rate Limiting Enabled: %t", appConfig.RateLimitEnable)
+		log.Printf("  Max Connections Per IP: %d", appConfig.MaxConnectionsPerIP)
+		log.Printf("  Max Commands Per Session: %d", appConfig.MaxCommandsPerSession)
+		log.Printf("  Max Recipients Per Message: %d", appConfig.MaxRecipientsPerMessage)
 
 
 		if len(appConfig.Users) > 0 {

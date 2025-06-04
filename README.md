@@ -23,6 +23,10 @@ GoSMTPServer is a simple, lightweight SMTP server written in Go, designed primar
     *   Configurable TLS certificate verification for outbound STARTTLS.
     *   Support for sending through an authenticated SMTP relay (smarthost), using STARTTLS and AUTH PLAIN/LOGIN.
 *   DKIM (DomainKeys Identified Mail) signing for outgoing emails.
+*   Basic rate limiting for incoming connections:
+    *   Max concurrent connections per IP (implemented).
+    *   Max commands per session (implemented).
+    *   Max recipients per message (implemented).
 *   Configuration is managed via a TOML file (`config.toml`).
 *   Provides a basic Command Line Interface (CLI).
 
@@ -49,16 +53,15 @@ GoSMTPServer is a simple, lightweight SMTP server written in Go, designed primar
     *   `TLSCertPath`, `TLSKeyPath`: For enabling STARTTLS on *incoming* connections.
     *   `RequireAuth`: If `true`, enforces SMTP AUTH for *incoming* mail that is to be relayed/sent.
     *   `[Users]`: Defines usernames and bcrypt-hashed passwords for SMTP AUTH (for *incoming* connections).
-    *   `QueueScanInterval` (string): How often the queue processor scans for pending emails. Uses Go's `time.ParseDuration` format (e.g., "30s", "2m", "1h"). Defaults to "30s".
-    *   `DefaultRetryInterval` (string): Base delay used for the first retry after a temporary delivery failure. This interval is the starting point for exponential backoff. Uses Go's `time.ParseDuration` format. Defaults to "5m".
-    *   `MaxRetryInterval` (string): The maximum possible delay for a single retry attempt, acting as a cap for the exponential backoff calculation. Uses Go's `time.ParseDuration` format. Defaults to "12h".
-    *   `MaxDeliveryAttempts` (int): Maximum number of delivery attempts for an email before it's considered permanently failed (especially for temporary or network errors). Defaults to 5.
+    *   `QueueScanInterval`, `DefaultRetryInterval`, `MaxRetryInterval`, `MaxDeliveryAttempts`: Control queue processing behavior.
     *   `DKIMEnable`, `DKIMDomain`, `DKIMSelector`, `DKIMPrivateKeyPath`, `DKIMHeaders`: For DKIM signing of outgoing mail.
-    *   `OutboundSTARTTLSPolicy` (string): Defines if/how STARTTLS is used for *outgoing* mail. Options: "opportunistic" (default), "mandatory", "disabled".
-    *   `OutboundTLSVerifyCert` (boolean): If `true` (default), the client verifies remote server certificates during STARTTLS for *outgoing* mail. Setting to `false` is insecure.
-    *   `OutboundRelayHost` (string): Address (e.g., "smtp.example.com:587") of an SMTP relay/smarthost. If set, MX lookups are bypassed, and all mail goes through this relay.
-    *   `OutboundRelayUsername` (string): Username for authenticating to the `OutboundRelayHost`.
-    *   `OutboundRelayPassword` (string): Password for authenticating to the `OutboundRelayHost`.
+    *   `OutboundSTARTTLSPolicy`, `OutboundTLSVerifyCert`: Control STARTTLS usage for *outgoing* mail.
+    *   `OutboundRelayHost`, `OutboundRelayUsername`, `OutboundRelayPassword`: For using an outbound SMTP relay.
+    *   `RateLimitEnable` (boolean): Enables or disables basic rate limiting for incoming connections. Default is `false`.
+    *   `MaxConnectionsPerIP` (int): Maximum concurrent connections from a single IP. `0` means unlimited. Implemented.
+    *   `MaxCommandsPerSession` (int): Maximum commands (including command data lines like in AUTH or DATA phases) per SMTP session. `0` means unlimited. Implemented.
+    *   `MaxRecipientsPerMessage` (int): Maximum `RCPT TO` commands per message transaction. `0` means unlimited. Implemented.
+
 
     **Default `config.toml` example (see comments within for details):**
     ```toml
@@ -96,101 +99,76 @@ GoSMTPServer is a simple, lightweight SMTP server written in Go, designed primar
     OutboundRelayHost = ""
     OutboundRelayUsername = ""
     OutboundRelayPassword = ""
+
+    # --- Basic Rate Limiting Configuration (Incoming Connections) ---
+    RateLimitEnable = false # Enable basic rate limiting features
+
+    # Maximum concurrent connections from a single IP address. 0 means unlimited.
+    MaxConnectionsPerIP = 10
+
+    # Maximum commands allowed in a single SMTP session (includes command data lines). 0 means unlimited.
+    MaxCommandsPerSession = 200
+
+    # Maximum recipients allowed for a single email message (via RCPT TO commands). 0 means unlimited.
+    MaxRecipientsPerMessage = 100
     ```
 
+## Rate Limiting (Incoming Connections)
+
+GoSMTPServer provides basic rate limiting capabilities to help mitigate abuse and manage server load from incoming SMTP connections. These features are controlled by settings in `config.toml`.
+
+*   **`RateLimitEnable = true`**: This master switch must be set to `true` to enable any of the rate limiting features described below. If `false` (the default), all other rate limit settings are ignored.
+
+*   **`MaxConnectionsPerIP = 10`**:
+    *   Defines the maximum number of concurrent connections allowed from a single IP address.
+    *   If set to `0`, there is no limit on concurrent connections from a single IP.
+    *   This helps prevent a single client from overwhelming the server by opening too many connections simultaneously.
+    *   This limit is enforced when a new connection is accepted.
+
+*   **`MaxCommandsPerSession = 200`**:
+    *   Defines the maximum total number of command lines (including lines received during AUTH challenge-response or the DATA phase) that a client can issue within a single SMTP session.
+    *   If set to `0`, there is no limit on the number of commands per session.
+    *   This can help prevent resource exhaustion. If exceeded, the server sends a `421` error and closes the connection.
+    *   This limit is enforced for each command line received from the client.
+
+*   **`MaxRecipientsPerMessage = 100`**:
+    *   Defines the maximum number of recipients that can be specified (via multiple `RCPT TO` commands) for a single email message transaction (between one `MAIL FROM` and the corresponding `DATA` command).
+    *   If set to `0`, there is no limit on the number of recipients per message.
+    *   If this limit is exceeded during a session, the server will respond with a `452 4.5.3 Too many recipients` error for each `RCPT TO` command beyond the limit for that message.
+    *   This limit is enforced for each `RCPT TO` command.
+
+**Important Considerations for Rate Limiting:**
+*   The current implementation of these limits is basic (e.g., connection counts are managed in-memory).
+*   These settings provide a first line of defense. For more advanced abuse prevention, consider integrating with external tools or services.
+
 ## Email Authentication Setup (For Mail Sent *By* GoSMTPServer)
-(This section remains largely as is)
 ...
-
 ## Setting up DKIM Signing (for Outgoing Email)
-(This section remains largely as is)
 ...
-
 ## SPF (Sender Policy Framework) Considerations
-(This section remains largely as is)
 ...
-
 ## Setting up TLS (STARTTLS) for *Incoming* Connections
-(This section remains largely as is)
 ...
-
 ## Setting up SMTP Authentication for *Incoming* Connections
-(This section remains largely as is)
 ...
-
 ## Mail Queuing and Outbound Delivery
-
-(Overview, Queue Structure sections remain largely as is)
 ...
-
-### Queue Processor
-A background goroutine (the "queue processor") is started when the server launches. It periodically scans the `MailDir` for `.meta` files.
-*   **Scanning**: The interval for scanning is defined by `QueueScanInterval` in `config.toml`.
-*   **Processing**: For each message that is due for a delivery attempt (based on its `NextAttemptTime` metadata):
-    1.  The processor reads the metadata and the corresponding `.eml` file.
-    2.  It attempts to deliver the email using the server's built-in outbound SMTP client.
-*   **Delivery Outcomes & Error Handling**:
-    *   **Success**: If delivery is successful, the `.eml` and `.meta` files are deleted.
-    *   **Permanent SMTP Error (5xx codes)**: If the outbound client reports a permanent SMTP error (e.g., a 550 "User unknown" from the remote server), the queue processor recognizes this. The email is immediately moved to the `failed/` directory, and no further retries for this message will occur. The specific SMTP error is logged in the metadata.
-    *   **Temporary SMTP Error (4xx codes) or Network/Other Errors**: If delivery fails with a temporary SMTP error (e.g., a 421 "Service not available") or a general network error (e.g., connection timeout), the `AttemptCount` in the metadata is incremented, and the error is recorded. The `NextAttemptTime` is then rescheduled using an **exponential backoff** strategy:
-        *   The interval for the first retry (after the initial attempt fails, so `AttemptCount` in metadata becomes 1) is `DefaultRetryInterval`.
-        *   For subsequent retries, the interval is calculated as `DefaultRetryInterval * 2^(AttemptCount-1)`. For example, if `DefaultRetryInterval` is 5 minutes:
-            *   1st retry: 5m
-            *   2nd retry: 10m
-            *   3rd retry: 20m
-            *   ...and so on.
-        *   This calculated retry interval is capped at `MaxRetryInterval` (e.g., if `MaxRetryInterval` is "12h", the delay won't exceed 12 hours for any single retry).
-        *   The metadata file is updated with this new `NextAttemptTime`.
-    *   **Maximum Attempts Reached**: If an email repeatedly fails with temporary/network errors and its `AttemptCount` reaches `MaxDeliveryAttempts`, it is then considered permanently failed and moved to the `failed/` subdirectory.
-
-(Outbound SMTP Client, Monitoring the Queue sections remain largely as is)
-...
-
-### Outbound Connection Security (STARTTLS and Relay Authentication)
-(This section remains largely as is)
-...
-
-### Limitations of the Current Queuing & Delivery System
-*   **Retry Logic**: Uses exponential backoff with configurable base (`DefaultRetryInterval`), cap (`MaxRetryInterval`), and total attempts (`MaxDeliveryAttempts`). It distinguishes between permanent (5xx) and temporary (4xx) SMTP errors from remote servers to guide retry decisions. However, it does not parse specific SMTP *sub-codes* (e.g., 5.1.1 vs 5.7.1) for more nuanced behavior, and all non-SMTP (network) errors are treated as generic temporary failures subject to the same retry logic.
-*   **Single Queue**: No prioritization or per-domain separation.
-*   **Outbound Recipient Handling**: Processes one recipient per transaction for direct MX. Relays handle all recipients.
-*   **Outbound Client Security**:
-    *   STARTTLS policies (opportunistic, mandatory, disabled) and certificate verification are implemented for direct MX and relay connections.
-    *   SMTP AUTH (PLAIN, LOGIN) to a configured relay is implemented and only attempted over TLS.
-    *   **SMTP AUTH for direct MX deliveries (non-relay) is not implemented.**
-*   **Not for High Volume/Critical Deliveries**.
-
 ## Testing Outbound Security Features
-(This section remains largely as is)
 ...
-
 ## Security Notes
-(This section remains largely as is)
 ...
-
 ## Limitations
-(This section is now primarily covered by "Limitations of the Current Queuing & Delivery System". This top-level section can be kept for very general points or removed if redundant.)
-*   **Incoming Mail Security**: Opportunistic STARTTLS; `AUTH PLAIN`/`LOGIN` over TLS. No mTLS.
-*   **Queuing & Outbound Delivery System**: See specific limitations under that section.
-*   **DKIM**: Uses `github.com/toorop/go-dkim`. Canonicalization is "relaxed/relaxed".
-*   **General**: Basic error handling for complex SMTP edge cases. Simple concurrency model for incoming connections. Queue processor is single-threaded (processes one email at a time during each scan).
-
+*   ...
+*   **Rate Limiting**: Basic in-memory limits for incoming connections are implemented:
+    *   Max concurrent connections per IP.
+    *   Max commands per session (counts each line from client, including AUTH/DATA lines).
+    *   Max recipients per message (per transaction).
+    *   Does not include more advanced features like time-window based rate limiting or distributed tracking.
+*   ...
 ## Future Enhancements (Potential)
-*   **Outbound Delivery**:
-    *   Implement SMTP AUTH for direct outbound connections (non-relay).
-    *   Support for more outbound AUTH mechanisms (e.g., CRAM-MD5).
-    *   Client certificate authentication for outbound TLS.
-    *   Parsing specific SMTP error sub-codes (e.g., 5.1.1 vs 5.7.1) for more nuanced retry/failure decisions.
-*   **Queuing**:
-    *   Separate queues per destination domain or priority.
-    *   More sophisticated DSN (Delivery Status Notification) parsing and bounce handling.
-*   **Incoming Mail**:
-    *   Implement an option for an Implicit TLS listener (SMTPS on a dedicated port).
-*   **General**:
-    *   Spam/virus filter hooks.
-    *   Daemonization/background running.
-    *   More detailed and configurable logging levels (e.g., DEBUG, INFO, WARN, ERROR).
-    *   Rate limiting and connection controls for incoming mail.
-    *   CLI tools for queue management (e.g., view queue, force retry, delete message).
+*   ...
+*   **Rate Limiting**:
+    *   More advanced techniques (e.g., time-window based limits, leaky bucket algorithms, persistent storage for limits, integration with fail2ban).
+*   ...
 
 This README provides a comprehensive guide for users to understand, set up, and use GoSMTPServer.

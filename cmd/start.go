@@ -3,10 +3,13 @@ package cmd
 import (
 	// "fmt" // Using log for all output
 	"log"
+	"fmt" // For quick response
+	"log"
 	"net"
 
 	"go-smtp/config"
 	"go-smtp/queue" // Added for queue processor
+	"go-smtp/ratelimit" // Added for connection rate limiting
 	"go-smtp/smtp"
 
 	"github.com/spf13/cobra"
@@ -60,8 +63,27 @@ var startCmd = &cobra.Command{
 				}
 				continue
 			}
-			// Pass the loaded appConfig to HandleConnection
-			go smtp.HandleConnection(conn, appConfig)
+
+			clientIP, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+			if err != nil {
+				log.Printf("ERROR: Could not extract IP from RemoteAddr %s: %v", conn.RemoteAddr().String(), err)
+				conn.Close()
+				continue
+			}
+
+			if appConfig.RateLimitEnable && appConfig.MaxConnectionsPerIP > 0 {
+				if !ratelimit.AllowConnection(clientIP, appConfig.MaxConnectionsPerIP) {
+					log.Printf("REJECT: Connection from %s rejected: too many concurrent connections (limit: %d)", clientIP, appConfig.MaxConnectionsPerIP)
+					// Best effort to send 421
+					quickResponse := fmt.Sprintf("421 %s Service not available, too many connections from your IP. Please try again later.\r\n", appConfig.ServerHostname)
+					_, _ = conn.Write([]byte(quickResponse))
+					conn.Close()
+					continue
+				}
+			}
+
+			// Pass clientIP to HandleConnection
+			go smtp.HandleConnection(conn, appConfig, clientIP)
 		}
 	},
 }

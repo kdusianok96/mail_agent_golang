@@ -32,6 +32,12 @@ type Config struct {
 	DKIMPrivateKeyPath string   `toml:"DKIMPrivateKeyPath"`
 	DKIMHeaders        []string `toml:"DKIMHeaders,omitempty"`
 
+	// Basic Rate Limiting
+	RateLimitEnable         bool `toml:"RateLimitEnable"`
+	MaxConnectionsPerIP     int  `toml:"MaxConnectionsPerIP"`
+	MaxCommandsPerSession   int  `toml:"MaxCommandsPerSession"`
+	MaxRecipientsPerMessage int  `toml:"MaxRecipientsPerMessage"`
+
 	// Outbound Email Security
 	OutboundSTARTTLSPolicy string `toml:"OutboundSTARTTLSPolicy"` // "opportunistic", "mandatory", "disabled"
 	OutboundTLSVerifyCert  bool   `toml:"OutboundTLSVerifyCert"`  // Default to true
@@ -161,6 +167,28 @@ func LoadConfig(filePath string) (*Config, error) {
 		cfg.DefaultRetryIntervalDuration = cfg.MaxRetryIntervalDuration
 	}
 
+	// Validate and set defaults for Rate Limiting
+	if cfg.RateLimitEnable {
+		if cfg.MaxConnectionsPerIP < 0 {
+			log.Printf("WARN: MaxConnectionsPerIP is negative (%d), defaulting to 0 (unlimited).", cfg.MaxConnectionsPerIP)
+			cfg.MaxConnectionsPerIP = 0
+		}
+		if cfg.MaxCommandsPerSession < 0 {
+			log.Printf("WARN: MaxCommandsPerSession is negative (%d), defaulting to 0 (unlimited).", cfg.MaxCommandsPerSession)
+			cfg.MaxCommandsPerSession = 0
+		}
+		if cfg.MaxRecipientsPerMessage < 0 {
+			log.Printf("WARN: MaxRecipientsPerMessage is negative (%d), defaulting to 0 (unlimited).", cfg.MaxRecipientsPerMessage)
+			cfg.MaxRecipientsPerMessage = 0
+		}
+	} else {
+		// If RateLimitEnable is false, it might be useful to ensure these are 0,
+		// or let their configured values stand (they just won't be used).
+		// For clarity, if rate limiting is disabled, let's log that values are ignored if set.
+		if cfg.MaxConnectionsPerIP != 0 || cfg.MaxCommandsPerSession != 0 || cfg.MaxRecipientsPerMessage != 0 {
+			log.Printf("INFO: RateLimitEnable is false. Any set values for MaxConnectionsPerIP, MaxCommandsPerSession, MaxRecipientsPerMessage will be ignored.")
+		}
+	}
 
 	return &cfg, nil
 }
