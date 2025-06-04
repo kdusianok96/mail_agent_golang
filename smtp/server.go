@@ -2,7 +2,9 @@ package smtp
 
 import (
 	"bufio"
+	"bufio"       // Will need to re-initialize reader/writer
 	"crypto/rand"
+	"crypto/tls" // Added for STARTTLS
 	"encoding/hex"
 	"fmt"
 	"log" // Added for enhanced logging
@@ -22,13 +24,15 @@ type sessionState struct {
 	hasSeenHelo     bool
 	mailFromAddress string
 	rcptToAddresses []string
-	isInDataMode    bool // Technically managed by the DATA command flow itself
+	isInDataMode    bool           // Technically managed by the DATA command flow itself
+	isTls           bool           // True if STARTTLS has been successfully negotiated
 	cfg             *config.Config // Added to store config
 }
 
 func newSessionState(cfg *config.Config) *sessionState {
 	return &sessionState{
 		rcptToAddresses: make([]string, 0),
+		isTls:           false,
 		cfg:             cfg,
 	}
 }
@@ -51,9 +55,14 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 
 	welcomeMsg := fmt.Sprintf("220 %s Welcome to GoSMTP\r\n", state.cfg.ServerHostname)
 	log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(welcomeMsg))
-	conn.Write([]byte(welcomeMsg))
+	conn.Write([]byte(welcomeMsg)) // Initial write on the raw connection
 
-	reader := bufio.NewReader(conn)
+	// Use a variable for the current connection, which might be upgraded to TLS
+	currentConn := conn
+	reader := bufio.NewReader(currentConn)
+	// Writer is not explicitly used for sending responses directly in this loop,
+	// but if it were, it would also need to be updated after STARTTLS.
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -106,19 +115,21 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 			}
 			state.clientHostname = parts[1]
 			state.hasSeenHelo = true
-			// For now, EHLO is the same as HELO. Can add capabilities later.
 			respBase := fmt.Sprintf("250-%s Hello %s\r\n", state.cfg.ServerHostname, state.clientHostname)
-			respPipelinig := "250 PIPELINING\r\n"
-			// respSize := "250 SIZE 10240000\r\n"
-			// respHelp := "250 HELP\r\n"
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(respBase))
-			conn.Write([]byte(respBase))
+			currentConn.Write([]byte(respBase))
+
+			// Advertise STARTTLS if configured and not already in TLS mode
+			if state.cfg.TLSCertPath != "" && state.cfg.TLSKeyPath != "" && !state.isTls {
+				starttlsAdvert := "250-STARTTLS\r\n"
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(starttlsAdvert))
+				currentConn.Write([]byte(starttlsAdvert))
+			}
+
+			// Other capabilities
+			respPipelinig := "250 PIPELINING\r\n" // Example capability, always send this as the last one with 250 instead of 250-
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(respPipelinig))
-			conn.Write([]byte(respPipelinig))
-			// log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(respSize))
-			// conn.Write([]byte(respSize))
-			// log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(respHelp))
-			// conn.Write([]byte(respHelp))
+			currentConn.Write([]byte(respPipelinig))
 		case "MAIL":
 			if !state.hasSeenHelo {
 				response = "503 Bad sequence of commands (HELO/EHLO first)\r\n"
@@ -137,7 +148,7 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 				}
 			}
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
 		case "RCPT":
 			if state.mailFromAddress == "" {
 				response = "503 Bad sequence of commands (MAIL FROM first)\r\n"
@@ -156,19 +167,81 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 				}
 			}
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
+		case "STARTTLS":
+			if state.isTls {
+				response = "503 Bad sequence of commands (TLS already active)\r\n"
+				log.Printf("WARN [%s]: STARTTLS attempted when TLS is already active.", clientAddr)
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				continue
+			}
+			if state.cfg.TLSCertPath == "" || state.cfg.TLSKeyPath == "" {
+				response = "454 TLS not available (server not configured for TLS)\r\n"
+				log.Printf("WARN [%s]: STARTTLS attempted but server not configured for TLS (cert or key path empty).", clientAddr)
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				continue
+			}
+
+			cert, err := tls.LoadX509KeyPair(state.cfg.TLSCertPath, state.cfg.TLSKeyPath)
+			if err != nil {
+				log.Printf("ERROR [%s]: Error loading TLS certificate/key (%s, %s): %v", clientAddr, state.cfg.TLSCertPath, state.cfg.TLSKeyPath, err)
+				response = "454 TLS not available (certificate/key error)\r\n"
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				continue
+			}
+
+			response = "220 Ready to start TLS\r\n"
+			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+			currentConn.Write([]byte(response))
+
+			tlsConfig := &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			}
+			tlsConn := tls.Server(currentConn, tlsConfig)
+			log.Printf("INFO [%s]: Starting TLS handshake...", clientAddr)
+			err = tlsConn.Handshake()
+			if err != nil {
+				log.Printf("ERROR [%s]: TLS handshake failed: %v", clientAddr, err)
+				// Connection is likely broken or will be closed by tls.Server internals on error.
+				// No further SMTP response can be reliably sent. Close and return.
+				currentConn.Close() // Ensure original connection is closed if handshake wrapper doesn't.
+				return
+			}
+			// log.Printf("INFO [%s]: TLS handshake successful.", clientAddr) // Covered by the next log
+
+			currentConn = tlsConn // Upgrade current connection to TLS wrapped version
+			reader = bufio.NewReader(currentConn) // Reset reader with new TLS connection
+
+			// Reset SMTP state as per RFC 3207 Section 4
+			// log.Printf("INFO [%s]: Resetting SMTP session state after successful STARTTLS.", clientAddr) // Covered by the next log
+			state.isTls = true
+			state.hasSeenHelo = false
+			state.clientHostname = ""
+			state.mailFromAddress = ""
+			state.rcptToAddresses = make([]string, 0) // Clear recipients
+			state.isInDataMode = false                // Should not be in data mode anyway here
+
+			log.Printf("INFO [%s]: Connection successfully upgraded to TLS and session state reset. Client should re-EHLO.", clientAddr)
+
+			// No explicit SMTP response here, client should re-EHLO.
+			continue // Continue the loop to read the next command (expected to be EHLO)
+
 		case "DATA":
 			if len(state.rcptToAddresses) == 0 {
 				response = "503 Bad sequence of commands (RCPT TO first)\r\n"
 				log.Printf("WARN [%s]: DATA before RCPT TO", clientAddr)
 				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-				conn.Write([]byte(response))
+				currentConn.Write([]byte(response))
 				continue
 			}
 			state.isInDataMode = true
 			response = "354 Start mail input; end with <CRLF>.<CRLF>\r\n"
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
 
 			var emailBody strings.Builder
 			for {
@@ -203,7 +276,7 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 					log.Printf("ERROR [%s]: Error creating mail directory %s: %v", clientAddr, mailDir, err)
 					response = "451 Requested action aborted: local error in processing (cannot create mail directory)\r\n"
 					log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-					conn.Write([]byte(response))
+					currentConn.Write([]byte(response))
 					state.resetMailState()
 					continue
 				}
@@ -216,7 +289,7 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 				log.Printf("ERROR [%s]: Error generating random string for filename: %v", clientAddr, err)
 				response = "451 Requested action aborted: local error in processing (cannot generate filename)\r\n"
 				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-				conn.Write([]byte(response))
+				currentConn.Write([]byte(response))
 				state.resetMailState()
 				continue
 			}
@@ -230,7 +303,7 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 				log.Printf("ERROR [%s]: Error writing email to file %s: %v", clientAddr, filePath, err)
 				response = "451 Requested action aborted: local error in processing (cannot write email file)\r\n"
 				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-				conn.Write([]byte(response))
+				currentConn.Write([]byte(response))
 				state.resetMailState()
 				continue
 			}
@@ -238,25 +311,26 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 			log.Printf("INFO [%s]: Email from %s to %v saved to %s", clientAddr, state.mailFromAddress, state.rcptToAddresses, filePath)
 			response = fmt.Sprintf("250 OK: message accepted for delivery (queued as %s)\r\n", filename)
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
 			state.resetMailState()
 		case "RSET":
 			log.Printf("INFO [%s]: Session reset initiated by RSET command.", clientAddr)
 			state.resetMailState()
-			state.hasSeenHelo = false
-			state.clientHostname = ""
+			// Per RFC 2228, RSET does not affect TLS state.
+			// state.hasSeenHelo = false  // This is part of resetMailState() if we want RSET to clear HELO
+			// state.clientHostname = ""
 			response = "250 OK\r\n"
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
 		case "NOOP":
 			response = "250 OK\r\n"
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
 		default:
 			response = "500 Syntax error, command unrecognized\r\n"
 			log.Printf("WARN [%s]: Unknown command: %s", clientAddr, commandLine)
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
 		}
 	}
 }

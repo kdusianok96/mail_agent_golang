@@ -27,6 +27,8 @@ var validateConfigCmd = &cobra.Command{
 		log.Printf("  Listen Port: %d", appConfig.ListenPort)
 		log.Printf("  Server Hostname: %s", appConfig.ServerHostname)
 		log.Printf("  Mail Directory: %s", appConfig.MailDir)
+		log.Printf("  TLS Cert Path: %s", appConfig.TLSCertPath)
+		log.Printf("  TLS Key Path: %s", appConfig.TLSKeyPath)
 	},
 }
 

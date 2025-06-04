@@ -2,3 +2,9 @@ ListenInterface = "0.0.0.0"
 ListenPort = 2525
 ServerHostname = "gosmtp.example.com"
 MailDir = "maildata"
+
+# TLS Configuration (optional, leave empty to disable TLS)
+# To enable TLS/STARTTLS, provide paths to your certificate and private key files.
+# If either TLSCertPath or TLSKeyPath is empty, TLS will be disabled.
+TLSCertPath = "server.crt" # Path to TLS certificate file (e.g., fullchain.pem)
+TLSKeyPath = "server.key"  # Path to TLS private key file (e.g., privkey.pem)

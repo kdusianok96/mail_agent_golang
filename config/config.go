@@ -11,6 +11,8 @@ type Config struct {
 	ListenPort      int    `toml:"ListenPort"`
 	ServerHostname  string `toml:"ServerHostname"`
 	MailDir         string `toml:"MailDir"`
+	TLSCertPath     string `toml:"TLSCertPath"` // Path to TLS certificate file
+	TLSKeyPath      string `toml:"TLSKeyPath"`  // Path to TLS private key file
 }
 
 // LoadConfig reads a TOML configuration file and unmarshals it into a Config struct.
