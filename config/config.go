@@ -1,7 +1,11 @@
 package config
 
 import (
+	"log"
 	"os"
+	"strings"
+	"time"
+
 	"github.com/BurntSushi/toml"
 )
 
@@ -11,182 +15,187 @@ type Config struct {
 	ListenPort      int    `toml:"ListenPort"`
 	ServerHostname  string `toml:"ServerHostname"`
 	MailDir         string `toml:"MailDir"`
-	TLSCertPath     string `toml:"TLSCertPath"` // Path to TLS certificate file
-	TLSKeyPath      string `toml:"TLSKeyPath"`  // Path to TLS private key file
-	Users           map[string]string `toml:"Users"`   // Username to bcrypt hashed password
-	RequireAuth     bool   `toml:"RequireAuth"` // If true, AUTH is required for MAIL FROM if users are configured and connection is secure
 
-	QueueScanIntervalStr string `toml:"QueueScanInterval"`    // e.g., "30s", "1m"
-	DefaultRetryIntervalStr string `toml:"DefaultRetryInterval"` // e.g., "5m", "1h"
-	MaxDeliveryAttempts    int    `toml:"MaxDeliveryAttempts"`
+	// Incoming TLS
+	TLSCertPath string `toml:"TLSCertPath"`
+	TLSKeyPath  string `toml:"TLSKeyPath"`
 
-	// Parsed values, not directly in TOML
-	QueueScanIntervalDuration   time.Duration `toml:"-"`
+	// Incoming SMTP AUTH
+	Users       map[string]string `toml:"Users"`
+	RequireAuth bool              `toml:"RequireAuth"`
+
+	// Queue & Delivery
+	QueueScanIntervalStr         string `toml:"QueueScanInterval"`
+	DefaultRetryIntervalStr      string `toml:"DefaultRetryInterval"`
+	MaxRetryIntervalStr          string `toml:"MaxRetryInterval"`
+	MaxDeliveryAttempts          int    `toml:"MaxDeliveryAttempts"`
+	QueueScanIntervalDuration    time.Duration `toml:"-"`
 	DefaultRetryIntervalDuration time.Duration `toml:"-"`
-	MaxRetryIntervalDuration    time.Duration `toml:"-"` // Added for exponential backoff cap
+	MaxRetryIntervalDuration     time.Duration `toml:"-"`
 
-	// DKIM Configuration
+	// DKIM Signing
 	DKIMEnable         bool     `toml:"DKIMEnable"`
 	DKIMDomain         string   `toml:"DKIMDomain"`
 	DKIMSelector       string   `toml:"DKIMSelector"`
 	DKIMPrivateKeyPath string   `toml:"DKIMPrivateKeyPath"`
 	DKIMHeaders        []string `toml:"DKIMHeaders,omitempty"`
 
-	// Basic Rate Limiting
+	// Rate Limiting (Incoming)
 	RateLimitEnable         bool `toml:"RateLimitEnable"`
 	MaxConnectionsPerIP     int  `toml:"MaxConnectionsPerIP"`
 	MaxCommandsPerSession   int  `toml:"MaxCommandsPerSession"`
 	MaxRecipientsPerMessage int  `toml:"MaxRecipientsPerMessage"`
 
-	// Outbound Email Security
+	// Outbound Email Security (Direct MX and Relay)
 	OutboundSTARTTLSPolicy string `toml:"OutboundSTARTTLSPolicy"` // "opportunistic", "mandatory", "disabled"
-	OutboundTLSVerifyCert  bool   `toml:"OutboundTLSVerifyCert"`  // Default to true
+	OutboundTLSVerifyCert  bool   `toml:"OutboundTLSVerifyCert"`  // Default to true via newConfigWithDefaults
 
 	// Outbound Relay (Smarthost) Configuration
-	OutboundRelayHost         string `toml:"OutboundRelayHost"`     // e.g., "smtp.example.com:587"
-	OutboundRelayUsername     string `toml:"OutboundRelayUsername"`
-	OutboundRelayPassword     string `toml:"OutboundRelayPassword"`
-	MaxRetryIntervalStr       string `toml:"MaxRetryInterval"`      // e.g., "12h", "24h"
-	// OutboundRelayAuthMechanism string `toml:"OutboundRelayAuthMechanism"` // Future: "PLAIN", "LOGIN", "CRAM-MD5"
+	OutboundRelayHost     string `toml:"OutboundRelayHost"`
+	OutboundRelayUsername string `toml:"OutboundRelayUsername"`
+	OutboundRelayPassword string `toml:"OutboundRelayPassword"`
+
+	// Incoming Email Filtering
+	IncomingFilterEnable            bool     `toml:"IncomingFilterEnable"`
+	IncomingFilterScriptPath        string   `toml:"IncomingFilterScriptPath"`
+	IncomingFilterScriptTimeoutStr  string   `toml:"IncomingFilterScriptTimeout"`
+	IncomingFilterScriptArgs        []string `toml:"IncomingFilterScriptArgs,omitempty"`
+	IncomingFilterActionOnDetection string   `toml:"IncomingFilterActionOnDetection"` // "reject", "add_header", "quarantine"
+	IncomingFilterRejectMessage     string   `toml:"IncomingFilterRejectMessage"`
+	IncomingFilterHeaderName        string   `toml:"IncomingFilterHeaderName"`
+	IncomingFilterQuarantineDir     string   `toml:"IncomingFilterQuarantineDir"`
+	IncomingFilterScriptTimeoutDuration time.Duration `toml:"-"`
 }
 
 // newConfigWithDefaults creates a Config with default values set before TOML unmarshalling.
+// This is useful for booleans that should default to true if missing from TOML.
 func newConfigWithDefaults() Config {
 	return Config{
 		OutboundTLSVerifyCert: true, // Default to true
-		// Initialize other fields that need non-zero defaults if TOML lib doesn't set them when key is missing
 	}
 }
 
 // LoadConfig reads a TOML configuration file and unmarshals it into a Config struct.
-// It also parses duration strings and sets defaults.
+// It also parses duration strings and sets defaults for various options.
 func LoadConfig(filePath string) (*Config, error) {
 	configFile, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
 
-	var cfg Config
+	cfg := newConfigWithDefaults() // Initialize with defaults
 	if _, err := toml.Decode(string(configFile), &cfg); err != nil {
 		return nil, err
 	}
 
-	// Parse QueueScanIntervalStr
+	// --- Queue & Delivery Durations ---
 	if cfg.QueueScanIntervalStr == "" {
-		cfg.QueueScanIntervalStr = "30s" // Default value if string is empty
-		log.Printf("WARN: QueueScanInterval not set in config, using default: %s", cfg.QueueScanIntervalStr)
+		cfg.QueueScanIntervalStr = "30s"; log.Printf("WARN: QueueScanInterval not set, using default: %s", cfg.QueueScanIntervalStr)
 	}
-	parsedScanInterval, err := time.ParseDuration(cfg.QueueScanIntervalStr)
+	cfg.QueueScanIntervalDuration, err = time.ParseDuration(cfg.QueueScanIntervalStr)
 	if err != nil {
 		log.Printf("WARN: Failed to parse QueueScanInterval '%s': %v. Using default 30s.", cfg.QueueScanIntervalStr, err)
-		parsedScanInterval = 30 * time.Second
+		cfg.QueueScanIntervalDuration = 30 * time.Second
 	}
-	cfg.QueueScanIntervalDuration = parsedScanInterval
 
-	// Parse DefaultRetryIntervalStr
 	if cfg.DefaultRetryIntervalStr == "" {
-		cfg.DefaultRetryIntervalStr = "5m" // Default value if string is empty
-		log.Printf("WARN: DefaultRetryInterval not set in config, using default: %s", cfg.DefaultRetryIntervalStr)
+		cfg.DefaultRetryIntervalStr = "5m"; log.Printf("WARN: DefaultRetryInterval not set, using default: %s", cfg.DefaultRetryIntervalStr)
 	}
-	parsedRetryInterval, err := time.ParseDuration(cfg.DefaultRetryIntervalStr)
+	cfg.DefaultRetryIntervalDuration, err = time.ParseDuration(cfg.DefaultRetryIntervalStr)
 	if err != nil {
 		log.Printf("WARN: Failed to parse DefaultRetryInterval '%s': %v. Using default 5m.", cfg.DefaultRetryIntervalStr, err)
-		parsedRetryInterval = 5 * time.Minute
+		cfg.DefaultRetryIntervalDuration = 5 * time.Minute
 	}
-	cfg.DefaultRetryIntervalDuration = parsedRetryInterval
 
-	// Set default for MaxDeliveryAttempts
+	if cfg.MaxRetryIntervalStr == "" {
+		cfg.MaxRetryIntervalStr = "12h"; log.Printf("WARN: MaxRetryInterval not set, using default: %s", cfg.MaxRetryIntervalStr)
+	}
+	cfg.MaxRetryIntervalDuration, err = time.ParseDuration(cfg.MaxRetryIntervalStr)
+	if err != nil {
+		log.Printf("WARN: Failed to parse MaxRetryInterval '%s': %v. Using default 12h.", cfg.MaxRetryIntervalStr, err)
+		cfg.MaxRetryIntervalDuration = 12 * time.Hour
+	}
+	if cfg.DefaultRetryIntervalDuration > cfg.MaxRetryIntervalDuration {
+		log.Printf("WARN: DefaultRetryInterval (%s) > MaxRetryInterval (%s). Setting Default to Max.", cfg.DefaultRetryIntervalDuration, cfg.MaxRetryIntervalDuration)
+		cfg.DefaultRetryIntervalDuration = cfg.MaxRetryIntervalDuration
+	}
 	if cfg.MaxDeliveryAttempts <= 0 {
-		log.Printf("WARN: MaxDeliveryAttempts not set or invalid in config, using default: 5.")
+		log.Printf("WARN: MaxDeliveryAttempts not set or invalid, using default: 5.")
 		cfg.MaxDeliveryAttempts = 5
 	}
 
-	// Set defaults for DKIM
+	// --- DKIM ---
 	if cfg.DKIMEnable {
-		if cfg.DKIMDomain == "" {
-			log.Printf("WARN: DKIMEnable is true, but DKIMDomain is not set. DKIM signing will likely fail.")
-			// DKIMDomain is critical, cannot really default.
-		}
-		if cfg.DKIMSelector == "" {
-			cfg.DKIMSelector = "default"
-			log.Printf("WARN: DKIMSelector not set in config while DKIMEnable is true, using default: '%s'", cfg.DKIMSelector)
-		}
-		if cfg.DKIMPrivateKeyPath == "" {
-			log.Printf("WARN: DKIMEnable is true, but DKIMPrivateKeyPath is not set. DKIM signing will fail.")
-		}
-		// DKIMHeaders can often be left to a library's default.
-		// If cfg.DKIMHeaders is nil (not just empty), it means it wasn't in the TOML.
-		// If it's an empty list `[]`, it means the user explicitly set it to empty.
-		// For now, we don't set default headers here; the signing library might have its own.
-		// If specific default headers were required by our chosen library, this would be the place.
-		// Example:
-		// if cfg.DKIMHeaders == nil && cfg.DKIMEnable { // only default if not specified at all
-		//    cfg.DKIMHeaders = []string{"From", "To", "Cc", "Subject", "Date", "Message-ID"}
-		//    log.Printf("INFO: DKIMHeaders not set, using library defaults (or internal defaults if any).")
-		// }
+		if cfg.DKIMDomain == "" { log.Printf("WARN: DKIMEnable is true, but DKIMDomain is not set.") }
+		if cfg.DKIMSelector == "" { cfg.DKIMSelector = "default"; log.Printf("WARN: DKIMSelector not set with DKIMEnable, using default: '%s'", cfg.DKIMSelector) }
+		if cfg.DKIMPrivateKeyPath == "" { log.Printf("WARN: DKIMEnable is true, but DKIMPrivateKeyPath is not set.") }
 	}
 
-	// Validate and set default for OutboundSTARTTLSPolicy
+	// --- Rate Limiting ---
+	if cfg.RateLimitEnable {
+		if cfg.MaxConnectionsPerIP < 0 { cfg.MaxConnectionsPerIP = 0; log.Printf("WARN: MaxConnectionsPerIP negative, defaulting to 0 (unlimited).") }
+		if cfg.MaxCommandsPerSession < 0 { cfg.MaxCommandsPerSession = 0; log.Printf("WARN: MaxCommandsPerSession negative, defaulting to 0 (unlimited).") }
+		if cfg.MaxRecipientsPerMessage < 0 { cfg.MaxRecipientsPerMessage = 0; log.Printf("WARN: MaxRecipientsPerMessage negative, defaulting to 0 (unlimited).") }
+	} else {
+		if cfg.MaxConnectionsPerIP != 0 || cfg.MaxCommandsPerSession != 0 || cfg.MaxRecipientsPerMessage != 0 {
+			log.Printf("INFO: RateLimitEnable is false. Settings for MaxConnectionsPerIP, MaxCommandsPerSession, MaxRecipientsPerMessage will be ignored.")
+		}
+	}
+
+	// --- Outbound Security ---
 	policy := strings.ToLower(cfg.OutboundSTARTTLSPolicy)
 	switch policy {
-	case "opportunistic", "mandatory", "disabled":
-		cfg.OutboundSTARTTLSPolicy = policy // Ensure it's stored in lowercase
-	case "":
-		log.Printf("WARN: OutboundSTARTTLSPolicy not set in config, using default: 'opportunistic'.")
-		cfg.OutboundSTARTTLSPolicy = "opportunistic"
-	default:
-		log.Printf("WARN: Invalid OutboundSTARTTLSPolicy '%s' in config, using default: 'opportunistic'.", cfg.OutboundSTARTTLSPolicy)
-		cfg.OutboundSTARTTLSPolicy = "opportunistic"
+	case "opportunistic", "mandatory", "disabled": cfg.OutboundSTARTTLSPolicy = policy
+	case "": cfg.OutboundSTARTTLSPolicy = "opportunistic"; log.Printf("WARN: OutboundSTARTTLSPolicy not set, using default: 'opportunistic'.")
+	default: cfg.OutboundSTARTTLSPolicy = "opportunistic"; log.Printf("WARN: Invalid OutboundSTARTTLSPolicy '%s', using default: 'opportunistic'.", policy)
 	}
-	// Note: OutboundTLSVerifyCert default is handled by newConfigWithDefaults if key is missing.
-	// If key `OutboundTLSVerifyCert = false` is present, it will be false.
+	// OutboundTLSVerifyCert default is true via newConfigWithDefaults()
 
+	// --- Outbound Relay ---
 	if cfg.OutboundRelayHost != "" {
-		log.Printf("INFO: OutboundRelayHost is configured (%s). All outgoing mail will be sent via this relay.", cfg.OutboundRelayHost)
+		log.Printf("INFO: OutboundRelayHost configured (%s). Outgoing mail will use this relay.", cfg.OutboundRelayHost)
 		if cfg.OutboundRelayUsername != "" && cfg.OutboundRelayPassword == "" {
-			log.Printf("WARN: OutboundRelayUsername (%s) is set, but OutboundRelayPassword is empty. Relay authentication might fail.", cfg.OutboundRelayUsername)
+			log.Printf("WARN: OutboundRelayUsername (%s) set, but OutboundRelayPassword is empty.", cfg.OutboundRelayUsername)
 		}
 	}
 
-	// Parse MaxRetryIntervalStr
-	if cfg.MaxRetryIntervalStr == "" {
-		cfg.MaxRetryIntervalStr = "12h" // Default value
-		log.Printf("WARN: MaxRetryInterval not set in config, using default: %s", cfg.MaxRetryIntervalStr)
-	}
-	parsedMaxRetryInterval, err := time.ParseDuration(cfg.MaxRetryIntervalStr)
-	if err != nil {
-		log.Printf("WARN: Failed to parse MaxRetryInterval '%s': %v. Using default 12h.", cfg.MaxRetryIntervalStr, err)
-		parsedMaxRetryInterval = 12 * time.Hour
-	}
-	cfg.MaxRetryIntervalDuration = parsedMaxRetryInterval
+	// --- Incoming Filter Configuration ---
+	if cfg.IncomingFilterEnable {
+		if cfg.IncomingFilterScriptPath == "" {
+			log.Printf("WARN: IncomingFilterEnable is true, but IncomingFilterScriptPath is empty. Filtering will effectively be disabled.")
+		}
 
-	// Ensure DefaultRetryInterval is not greater than MaxRetryInterval
-	if cfg.DefaultRetryIntervalDuration > cfg.MaxRetryIntervalDuration {
-		log.Printf("WARN: DefaultRetryInterval (%s) is greater than MaxRetryInterval (%s). Setting DefaultRetryInterval to MaxRetryInterval.",
-			cfg.DefaultRetryIntervalDuration, cfg.MaxRetryIntervalDuration)
-		cfg.DefaultRetryIntervalDuration = cfg.MaxRetryIntervalDuration
-	}
+		if cfg.IncomingFilterScriptTimeoutStr == "" {
+			cfg.IncomingFilterScriptTimeoutStr = "30s" // Default value
+			log.Printf("WARN: IncomingFilterScriptTimeout not set, using default: %s", cfg.IncomingFilterScriptTimeoutStr)
+		}
+		parsedFilterTimeout, err := time.ParseDuration(cfg.IncomingFilterScriptTimeoutStr)
+		if err != nil {
+			log.Printf("WARN: Failed to parse IncomingFilterScriptTimeout '%s': %v. Using default 30s.", cfg.IncomingFilterScriptTimeoutStr, err)
+			parsedFilterTimeout = 30 * time.Second
+		}
+		cfg.IncomingFilterScriptTimeoutDuration = parsedFilterTimeout
 
-	// Validate and set defaults for Rate Limiting
-	if cfg.RateLimitEnable {
-		if cfg.MaxConnectionsPerIP < 0 {
-			log.Printf("WARN: MaxConnectionsPerIP is negative (%d), defaulting to 0 (unlimited).", cfg.MaxConnectionsPerIP)
-			cfg.MaxConnectionsPerIP = 0
+		action := strings.ToLower(cfg.IncomingFilterActionOnDetection)
+		switch action {
+		case "reject", "add_header", "quarantine":
+			cfg.IncomingFilterActionOnDetection = action
+		case "":
+			cfg.IncomingFilterActionOnDetection = "add_header"; log.Printf("WARN: IncomingFilterActionOnDetection not set, using default: 'add_header'.")
+		default:
+			cfg.IncomingFilterActionOnDetection = "add_header"; log.Printf("WARN: Invalid IncomingFilterActionOnDetection '%s', using default: 'add_header'.", action)
 		}
-		if cfg.MaxCommandsPerSession < 0 {
-			log.Printf("WARN: MaxCommandsPerSession is negative (%d), defaulting to 0 (unlimited).", cfg.MaxCommandsPerSession)
-			cfg.MaxCommandsPerSession = 0
+
+		if cfg.IncomingFilterActionOnDetection == "reject" && cfg.IncomingFilterRejectMessage == "" {
+			cfg.IncomingFilterRejectMessage = "554 5.7.1 Message content rejected due to policy."
+			log.Printf("WARN: IncomingFilterRejectMessage not set for 'reject' action, using default: '%s'", cfg.IncomingFilterRejectMessage)
 		}
-		if cfg.MaxRecipientsPerMessage < 0 {
-			log.Printf("WARN: MaxRecipientsPerMessage is negative (%d), defaulting to 0 (unlimited).", cfg.MaxRecipientsPerMessage)
-			cfg.MaxRecipientsPerMessage = 0
+		if cfg.IncomingFilterActionOnDetection == "add_header" && cfg.IncomingFilterHeaderName == "" {
+			cfg.IncomingFilterHeaderName = "X-GoSMTPServer-Scan-Result"
+			log.Printf("WARN: IncomingFilterHeaderName not set for 'add_header' action, using default: '%s'", cfg.IncomingFilterHeaderName)
 		}
-	} else {
-		// If RateLimitEnable is false, it might be useful to ensure these are 0,
-		// or let their configured values stand (they just won't be used).
-		// For clarity, if rate limiting is disabled, let's log that values are ignored if set.
-		if cfg.MaxConnectionsPerIP != 0 || cfg.MaxCommandsPerSession != 0 || cfg.MaxRecipientsPerMessage != 0 {
-			log.Printf("INFO: RateLimitEnable is false. Any set values for MaxConnectionsPerIP, MaxCommandsPerSession, MaxRecipientsPerMessage will be ignored.")
+		if cfg.IncomingFilterActionOnDetection == "quarantine" && cfg.IncomingFilterQuarantineDir == "" {
+			log.Printf("ERROR: IncomingFilterActionOnDetection is 'quarantine', but IncomingFilterQuarantineDir is not set. Quarantine action will likely fail or be disabled.")
 		}
 	}
 

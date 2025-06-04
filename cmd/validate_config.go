@@ -56,6 +56,15 @@ var validateConfigCmd = &cobra.Command{
 		log.Printf("  Max Connections Per IP: %d", appConfig.MaxConnectionsPerIP)
 		log.Printf("  Max Commands Per Session: %d", appConfig.MaxCommandsPerSession)
 		log.Printf("  Max Recipients Per Message: %d", appConfig.MaxRecipientsPerMessage)
+		log.Println("  --- Incoming Email Filtering ---")
+		log.Printf("  Incoming Filter Enabled: %t", appConfig.IncomingFilterEnable)
+		log.Printf("  Incoming Filter Script Path: %s", appConfig.IncomingFilterScriptPath)
+		log.Printf("  Incoming Filter Script Timeout: %s (parsed: %s)", appConfig.IncomingFilterScriptTimeoutStr, appConfig.IncomingFilterScriptTimeoutDuration.String())
+		log.Printf("  Incoming Filter Script Args: %v", appConfig.IncomingFilterScriptArgs)
+		log.Printf("  Incoming Filter Action on Detection: %s", appConfig.IncomingFilterActionOnDetection)
+		log.Printf("  Incoming Filter Reject Message: %s", appConfig.IncomingFilterRejectMessage)
+		log.Printf("  Incoming Filter Header Name: %s", appConfig.IncomingFilterHeaderName)
+		log.Printf("  Incoming Filter Quarantine Dir: %s", appConfig.IncomingFilterQuarantineDir)
 
 
 		if len(appConfig.Users) > 0 {

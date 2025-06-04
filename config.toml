@@ -3,98 +3,84 @@ ListenPort = 2525
 ServerHostname = "gosmtp.example.com"
 MailDir = "maildata"
 
-# TLS Configuration (optional, leave empty to disable TLS)
-# To enable TLS/STARTTLS, provide paths to your certificate and private key files.
-# If either TLSCertPath or TLSKeyPath is empty, TLS will be disabled.
-TLSCertPath = "server.crt" # Path to TLS certificate file (e.g., fullchain.pem)
-TLSKeyPath = "server.key"  # Path to TLS private key file (e.g., privkey.pem)
+# --- Incoming Connection Security ---
+TLSCertPath = "server.crt"
+TLSKeyPath = "server.key"
 
-# SMTP User Authentication (optional)
-# Define users and their bcrypt hashed passwords for SMTP AUTH.
-# If the [Users] section is missing or empty, SMTP AUTH will effectively be disabled
-# as there will be no users to authenticate against.
-[Users]
-# To generate a bcrypt hash for a password, you can use a simple Go program
-# (see README.md for an example) or an online bcrypt generator.
-# Ensure the cost factor used for hashing is reasonable (e.g., 10-12).
-#
-# Example users (replace with your actual usernames and bcrypt hashes):
+[Users] # For incoming SMTP AUTH
 # testuser1 = "$2a$10$YourBcryptHashForUser1PasswordGoesHere"
 # anotheruser = "$2a$10$AnotherBcryptHashForPasswordHere"
 
-# Require Authentication
-# If true, and if users are defined in the [Users] section,
-# the server will require clients to authenticate via SMTP AUTH (typically after STARTTLS)
-# before accepting MAIL FROM commands.
-# If false, or if no users are defined, MAIL FROM will be accepted without AUTH.
-# For a server that accepts external mail, this should generally be true.
-RequireAuth = false # Set to true to enforce authentication
+RequireAuth = false # For incoming mail
 
-# Outbound Mail Delivery Queue Configuration
-QueueScanInterval = "30s"    # How often the queue processor scans for pending emails.
-                             # Valid time units: "ns", "us" (or "µs"), "ms", "s", "m", "h".
-DefaultRetryInterval = "5m"  # Default delay before retrying a temporarily failed email. This is the base for exponential backoff.
-MaxDeliveryAttempts = 5      # Maximum number of delivery attempts before an email is moved
-                             # to the 'failed' directory. Must be > 0.
-MaxRetryInterval = "12h"     # Maximum delay for a single retry, capping the exponential backoff.
-                             # e.g., "1h", "12h", "24h".
+# --- Mail Queue & Delivery ---
+QueueScanInterval = "30s"
+DefaultRetryInterval = "5m"  # Base for exponential backoff
+MaxRetryInterval = "12h"     # Cap for exponential backoff interval
+MaxDeliveryAttempts = 5
 
-# --- DKIM Signing Configuration ---
-# DomainKeys Identified Mail (DKIM) signs outgoing emails to verify their authenticity.
-DKIMEnable = false                 # Set to true to enable DKIM signing for outgoing emails.
-DKIMDomain = "yourdomain.com"      # The domain to sign emails for (e.g., the domain in your From address).
-                                   # This domain should have the DKIM public key in its DNS records.
-DKIMSelector = "default"           # The DKIM selector used in DNS queries (e.g., "default._domainkey.yourdomain.com").
-                                   # If empty and DKIMEnable is true, "default" will be used.
-DKIMPrivateKeyPath = "/etc/gosmtpd/dkim/private.key" # Path to your DKIM RSA private key file.
-                                                     # Ensure this file is readable by the server process and kept secure.
-# DKIMHeaders = ["From", "To", "Cc", "Subject", "Date", "Message-ID"] # Optional: specific headers to include in the signature.
-                                                                     # Most libraries have sensible defaults if this is omitted or empty.
+# --- DKIM Signing for Outgoing Mail ---
+DKIMEnable = false
+DKIMDomain = "yourdomain.com"
+DKIMSelector = "default"
+DKIMPrivateKeyPath = "/etc/gosmtpd/dkim/private.key"
+# DKIMHeaders = ["From", "To", "Cc", "Subject", "Date", "Message-ID"]
 
-# --- Outbound Email Security ---
-# OutboundSTARTTLSPolicy: Defines if and how STARTTLS is used for outgoing mail sent by this server.
-# Options:
-#   "opportunistic" - (Default) Use STARTTLS if advertised by the remote server. If STARTTLS handshake fails,
-#                     the email will typically be sent in plaintext (current client behavior).
-#   "mandatory"     - Always use STARTTLS. If the remote server doesn't support STARTTLS or the TLS handshake
-#                     fails, the email delivery to that server will fail.
-#   "disabled"      - Never attempt STARTTLS. Send all outgoing mail in plaintext.
+# --- Outbound Connection Security & Relay ---
 OutboundSTARTTLSPolicy = "opportunistic"
-
-# OutboundTLSVerifyCert: If true (default), the server will verify the certificate of the remote mail server
-# when using STARTTLS for outgoing connections.
-# Setting this to false is highly insecure (disables protection against MITM attacks) and
-# should only be used for specific testing scenarios with trusted networks or self-signed certs.
 OutboundTLSVerifyCert = true
 
-# --- Outbound Relay (Smarthost) Configuration ---
-# If OutboundRelayHost is set (e.g., "smtp.yoursmarthost.com:587"), all outgoing emails
-# will be sent through this relay instead of direct delivery via MX lookup.
-# The port is important (e.g., 587 often implies STARTTLS, 25 for traditional SMTP, 465 for SMTPS/TLS).
-OutboundRelayHost = "" # e.g., "mail.isp.com:587" or "192.168.1.100:25"
+OutboundRelayHost = ""
+OutboundRelayUsername = ""
+OutboundRelayPassword = ""
 
-# Credentials for the OutboundRelayHost (if it requires authentication).
-# These are used when connecting to your smarthost.
-OutboundRelayUsername = "" # e.g., "your_relay_auth_username"
-OutboundRelayPassword = "" # e.g., "your_relay_auth_password"
-# Note: Storing passwords in plaintext in config files has security implications.
-# Ensure this file has restricted permissions.
-
-# --- Basic Rate Limiting Configuration ---
-# These settings provide basic control over connection and command frequency.
-# The actual enforcement logic is implemented in the SMTP server session handler.
-RateLimitEnable = false # Set to true to enable these basic rate limiting features.
-
-# MaxConnectionsPerIP: Maximum number of concurrent connections allowed from a single IP address.
-# A value of 0 means unlimited.
+# --- Basic Rate Limiting Configuration (Incoming Connections) ---
+RateLimitEnable = false
 MaxConnectionsPerIP = 10
-
-# MaxCommandsPerSession: Maximum total number of commands allowed in a single SMTP session
-# before the server may take action (e.g., issue a warning or close the session).
-# A value of 0 means unlimited.
 MaxCommandsPerSession = 200
-
-# MaxRecipientsPerMessage: Maximum number of recipients (RCPT TO commands) allowed
-# for a single email message transaction.
-# A value of 0 means unlimited.
 MaxRecipientsPerMessage = 100
+
+# --- Incoming Email Filtering (Content Scanning) ---
+# Enable external script-based filtering for incoming mail.
+IncomingFilterEnable = false
+
+# Path to the external filter script.
+# The script will receive raw email content (including all headers and body) via STDIN.
+# Expected script exit codes:
+#   0: Email is clean, proceed with normal delivery.
+#   1: Email is considered spam/malicious (or any other category requiring action).
+#   Other non-zero exit codes might also be treated as detection, or could indicate script error.
+# STDOUT from the script can be used to pass back header lines (one per line, e.g., "X-Spam-Score: 10.0")
+# to be prepended to the email if the action is "add_header".
+IncomingFilterScriptPath = "/usr/local/bin/email_scanner.sh"
+
+# Timeout for the filter script execution (e.g., "10s", "30s", "1m"). Default "30s".
+IncomingFilterScriptTimeout = "30s"
+
+# Optional arguments to pass to the script. Email data is always passed via STDIN.
+# Example: IncomingFilterScriptArgs = ["--mode=detailed", "--level=3"]
+IncomingFilterScriptArgs = []
+
+# Action to take if the script detects an issue (e.g., exits with code 1).
+# Options:
+#   "reject"     - Reject the email with an SMTP error (see IncomingFilterRejectMessage).
+#   "add_header" - (Default) Prepend headers from script STDOUT to the email and accept it for delivery/queuing.
+#                  If script STDOUT is empty, a default header (see IncomingFilterHeaderName) might be added.
+#   "quarantine" - Move the email to IncomingFilterQuarantineDir instead of the main MailDir queue.
+IncomingFilterActionOnDetection = "add_header"
+
+# SMTP message to use if IncomingFilterActionOnDetection is "reject".
+# Default: "554 5.7.1 Message content rejected due to policy."
+IncomingFilterRejectMessage = "554 5.7.1 Message content rejected by content filter."
+
+# Header name to add if action is "add_header" AND the script signals detection (e.g., non-zero exit)
+# BUT does not provide any specific headers via its STDOUT. The value for this header could be generic,
+# like "Detected by content filter".
+# If the script provides its own headers (e.g., "X-Spam-Status: Yes"), those are used directly.
+# Default: "X-GoSMTPServer-Scan-Result" (with a value like "Positive" or "Detected")
+IncomingFilterHeaderName = "X-Content-Scan-Result"
+
+# Directory to move emails to if action is "quarantine" and detection occurs.
+# Ensure this directory is writable by the server and ideally different from MailDir.
+# If empty and action is "quarantine", it's a misconfiguration.
+IncomingFilterQuarantineDir = "/var/spool/gosmtpd/quarantine"
