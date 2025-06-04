@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go-smtp/config" // Added import for config
+	"go-smtp/queue"  // Added for mail queue metadata
 	"golang.org/x/crypto/bcrypt" // Added for password hashing
 )
 
@@ -503,22 +504,52 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 				continue
 			}
 			randomString := hex.EncodeToString(randomBytes)
-			filename := fmt.Sprintf("%s_%s.eml", timestamp, randomString)
-			filePath := filepath.Join(mailDir, filename)
+			messageID := fmt.Sprintf("%s_%s", timestamp, randomString) // Filename base is now MessageID
+			emlFilePath := filepath.Join(mailDir, messageID+".eml")
+			metaFilePath := filepath.Join(mailDir, messageID+".meta")
 
 			fullEmailContent := emailBody.String()
-			err = os.WriteFile(filePath, []byte(fullEmailContent), 0640)
+			err = os.WriteFile(emlFilePath, []byte(fullEmailContent), 0640)
 			if err != nil {
-				log.Printf("ERROR [%s]: Error writing email to file %s: %v", clientAddr, filePath, err)
-				response = "451 Requested action aborted: local error in processing (cannot write email file)\r\n"
+				log.Printf("ERROR [%s]: Error writing email data to %s: %v", clientAddr, emlFilePath, err)
+				response = "451 Requested action aborted: local error in processing (cannot save email data)\r\n"
 				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
 				currentConn.Write([]byte(response))
 				state.resetMailState()
 				continue
 			}
+			log.Printf("INFO [%s]: Email data from %s to %v saved to %s", clientAddr, state.mailFromAddress, state.rcptToAddresses, emlFilePath)
 
-			log.Printf("INFO [%s]: Email from %s to %v saved to %s", clientAddr, state.mailFromAddress, state.rcptToAddresses, filePath)
-			response = fmt.Sprintf("250 OK: message accepted for delivery (queued as %s)\r\n", filename)
+			// Create and save metadata
+			now := time.Now()
+			metadata := &queue.MailMetadata{
+				MessageID:       messageID,
+				Sender:          state.mailFromAddress,
+				Recipients:      state.rcptToAddresses, // Storing all recipients from the transaction
+				ReceivedTime:    now,
+				NextAttemptTime: now, // Ready for immediate processing
+				AttemptCount:    0,
+				// LastAttemptTime is zero initially
+				// LastError is empty initially
+			}
+
+			if err := queue.SaveMetadata(metaFilePath, metadata); err != nil {
+				log.Printf("CRITICAL [%s]: Email data saved to %s but FAILED to save metadata to %s: %v. This message may not be processed.", clientAddr, emlFilePath, metaFilePath, err)
+				// This is an inconsistent state. The email is saved but won't be processed without metadata.
+				// Options: attempt to delete emlFilePath, or leave it for manual recovery.
+				// For now, log critical and send a generic error, as client already got 354.
+				// A more specific error might be 451 or 554.
+				response = "451 Requested action aborted: local error in processing (internal server error)\r\n" // Client doesn't need to know it's metadata
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				state.resetMailState()
+				continue
+			}
+			// Consolidated log message for queuing
+			log.Printf("INFO [%s]: Email (MessageID: %s) from %s to %v queued successfully. Data: %s, Meta: %s",
+				clientAddr, messageID, state.mailFromAddress, state.rcptToAddresses, emlFilePath, metaFilePath)
+
+			response = fmt.Sprintf("250 OK: message accepted for delivery (queued as %s)\r\n", messageID)
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
 			currentConn.Write([]byte(response))
 			state.resetMailState()

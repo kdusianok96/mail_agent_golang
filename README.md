@@ -2,9 +2,9 @@
 
 ## Overview
 
-GoSMTPServer is a simple, lightweight SMTP server written in Go, designed primarily for development, testing, or small-scale applications where emails are received and stored locally as files.
+GoSMTPServer is a simple, lightweight SMTP server written in Go, designed primarily for development, testing, or small-scale applications where emails are received and stored locally as files for later outbound delivery.
 
-**⚠️ Important Note:** This is a basic implementation and is **NOT SUITABLE FOR PRODUCTION USE**. It lacks critical security features like robust TLS certificate validation beyond what the `crypto/tls` package provides by default, comprehensive spam filtering, and advanced performance optimizations found in production-grade mail servers.
+**⚠️ Important Note:** This is a basic implementation and is **NOT SUITABLE FOR PRODUCTION USE**. It lacks critical security features like robust TLS certificate validation, comprehensive spam filtering, and advanced performance optimizations found in production-grade mail servers. The queuing and delivery system is also rudimentary.
 
 ## Features
 
@@ -16,13 +16,13 @@ GoSMTPServer is a simple, lightweight SMTP server written in Go, designed primar
     *   `RSET`
     *   `QUIT`
     *   `NOOP`
-*   Receives emails and stores them as individual `.eml` files in a local directory.
-*   Configuration is managed via a TOML file (`config.toml`).
-*   Provides a basic Command Line Interface (CLI) for:
-    *   Starting the server.
-    *   Validating the configuration file.
 *   STARTTLS support for opportunistic TLS encryption.
 *   SMTP Authentication (`AUTH PLAIN`, `AUTH LOGIN`) over TLS to control mail sending.
+*   On-disk mail queuing: Received emails are stored locally for asynchronous outbound delivery.
+*   Background queue processor: Periodically scans the queue, attempts delivery, handles retries for temporary failures, and moves emails to a "failed" directory after repeated failures.
+*   Basic outbound SMTP client: Performs MX lookups and attempts to deliver emails to recipient mail servers.
+*   Configuration is managed via a TOML file (`config.toml`).
+*   Provides a basic Command Line Interface (CLI) for starting the server and validating the configuration.
 
 ## Prerequisites
 
@@ -47,11 +47,14 @@ GoSMTPServer is a simple, lightweight SMTP server written in Go, designed primar
     *   `ListenInterface` (string): IP address to listen on (e.g., `"0.0.0.0"` for all, `"127.0.0.1"` for local).
     *   `ListenPort` (int): Port to listen on (e.g., `2525`).
     *   `ServerHostname` (string): Hostname used in SMTP greetings (e.g., `"gosmtp.example.com"`).
-    *   `MailDir` (string): Directory to store received emails (e.g., `"maildata"`). Created if it doesn't exist.
+    *   `MailDir` (string): Directory to store received emails for queuing and delivery (e.g., `"maildata"`). This directory and its subdirectories (`corrupt`, `failed`) will be created if they don't exist.
     *   `TLSCertPath` (string): Path to TLS certificate file. Enables STARTTLS if both this and `TLSKeyPath` are set.
     *   `TLSKeyPath` (string): Path to TLS private key file. Enables STARTTLS if both this and `TLSCertPath` are set.
     *   `RequireAuth` (boolean): If `true`, requires clients to authenticate via SMTP AUTH (after STARTTLS) before `MAIL FROM` is accepted. This applies only if users are defined in the `[Users]` section. Default is `false`.
     *   `[Users]` (table): Defines usernames and their bcrypt hashed passwords for SMTP AUTH.
+    *   `QueueScanInterval` (string): How often the queue processor scans for pending emails. Uses Go's `time.ParseDuration` format (e.g., "30s", "2m", "1h"). Defaults to "30s".
+    *   `DefaultRetryInterval` (string): Default delay before retrying an email after a temporary delivery failure. Uses Go's `time.ParseDuration` format. Defaults to "5m".
+    *   `MaxDeliveryAttempts` (int): Maximum number of delivery attempts for an email before it's considered permanently failed and moved to the "failed" directory. Defaults to 5.
 
     **Default `config.toml` example:**
     ```toml
@@ -74,13 +77,76 @@ GoSMTPServer is a simple, lightweight SMTP server written in Go, designed primar
     # Require Authentication for Sending
     # If true, and users are defined, clients must AUTH before MAIL FROM.
     RequireAuth = false
+
+    # Outbound Mail Delivery Queue Configuration
+    QueueScanInterval = "30s"    # How often the queue processor scans for pending emails.
+                                 # Valid time units: "ns", "us" (or "µs"), "ms", "s", "m", "h".
+    DefaultRetryInterval = "5m"  # Default delay before retrying a temporarily failed email.
+    MaxDeliveryAttempts = 5      # Maximum number of delivery attempts before an email is moved
+                                 # to the 'failed' directory. Must be > 0.
     ```
+
+## Mail Queuing and Outbound Delivery
+
+### Overview
+When GoSMTPServer receives an email (after the `DATA` command and successful transaction), it doesn't deliver it directly during the SMTP session. Instead, the email is placed into an on-disk queue for asynchronous outbound delivery.
+
+**Queue Structure:**
+*   Emails are stored in the directory specified by `MailDir` in `config.toml`. This directory functions as the mail spool or queue.
+*   Each queued email consists of two files:
+    *   `<MessageID>.eml`: The raw email content, including all headers and the body.
+    *   `<MessageID>.meta`: A JSON file containing metadata about the email, such as sender, recipients, received time, delivery attempts, next scheduled attempt, and any last error. The `MessageID` is typically a timestamp combined with a random string.
+*   **Subdirectories within `MailDir`**:
+    *   `corrupt/`: If a `.meta` file is unparseable, or if its corresponding `.eml` file is missing or unreadable, the problematic file(s) are moved here by the queue processor.
+    *   `failed/`: If an email reaches the `MaxDeliveryAttempts` limit, both its `.eml` and `.meta` files are moved here, and no further delivery attempts will be made by the processor.
+
+### Queue Processor
+A background goroutine (the "queue processor") is started when the server launches. It periodically scans the `MailDir` for `.meta` files.
+*   **Scanning**: The interval for scanning is defined by `QueueScanInterval` in `config.toml`.
+*   **Processing**: For each message that is due for a delivery attempt (based on its `NextAttemptTime` metadata):
+    1.  The processor reads the metadata and the corresponding `.eml` file.
+    2.  It attempts to deliver the email using the server's built-in outbound SMTP client.
+*   **Delivery Outcomes**:
+    *   **Success**: If delivery to a recipient's mail server is successful, the `.eml` and `.meta` files for that email are deleted from the queue.
+    *   **Temporary Failure**: If delivery fails with what is considered a temporary error (e.g., connection issue, 4xx SMTP code from remote server), the `AttemptCount` in the metadata is incremented, the error is recorded, and `NextAttemptTime` is rescheduled based on `DefaultRetryInterval`. The metadata file is updated with this new information.
+    *   **Permanent Failure**: If `AttemptCount` reaches `MaxDeliveryAttempts`, the email is considered permanently failed. The `.eml` and `.meta` files are moved to the `failed/` subdirectory for manual inspection.
+
+### Outbound SMTP Client
+GoSMTPServer includes a basic outbound SMTP client responsible for the actual delivery of queued emails.
+*   It performs MX lookups for the recipient domains to find the appropriate mail servers.
+*   It connects to these servers on port 25 and attempts to deliver the email using standard SMTP commands (EHLO, MAIL FROM, RCPT TO, DATA, QUIT).
+
+### Monitoring the Queue / Checking Logs
+The primary way to monitor the queue and delivery status is by observing the server's log output (standard output). Key log messages include:
+
+*   **Queuing**: `INFO [...]: Email (MessageID: ...) ... queued successfully. Data: ..., Meta: ...`
+*   **Queue Scan**: `INFO: Queue processor tick: scanning for emails...`
+*   **Processing File**: `INFO: Processing queue file: <MailDir>/<MessageID>.meta`
+*   **Skipping (Retry Delay)**: `INFO: Skipping MessageID: ..., next attempt not due until ...`
+*   **Delivery Attempt**: `INFO: Attempting delivery for MessageID: ... (Attempt X/Y) to recipients: ...`
+*   **Outbound Client Activity**: Logs prefixed with `SMTP_CLIENT` show details of MX lookups, connection attempts, and SMTP command interactions with remote servers.
+*   **Delivery Success**: `INFO: Email MessageID: ... delivered successfully ... Removing from queue.`
+*   **Temporary Failure**: `WARN: Temporary delivery failure for MessageID: ... Next attempt at: ...`
+*   **Permanent Failure**: `ERROR: Email MessageID: ... failed permanently ... Moving to 'failed' directory.`
+*   **Corrupt/Missing Files**: `ERROR: Failed to load metadata... Moving to 'corrupt' directory.` or `ERROR: Missing .eml file for ... Moving metadata to 'corrupt' directory.`
+
+Users should also check the `MailDir/failed/` and `MailDir/corrupt/` directories for emails that require manual inspection or intervention.
+
+### Limitations of the Current Queuing & Delivery System
+This is a **basic queuing and delivery system** and has several important limitations:
+*   **Simple Retry Logic**: Uses a fixed `DefaultRetryInterval`. No exponential backoff, per-domain retry policies, or parsing of specific SMTP error codes for smarter retries.
+*   **Single Queue**: All outgoing mail resides in a single queue directory. There's no prioritization or separate handling for different destination domains.
+*   **Outbound Recipient Handling**: The outbound `delivery.SendEmail` function currently processes only the first recipient listed in an email's metadata if multiple recipients were part of the original transaction. Each recipient for multi-recipient emails will effectively be handled as if it were a separate email to that one recipient during delivery processing by the queue. (The metadata stores all original recipients).
+*   **No Outbound STARTTLS/AUTH**: The built-in outbound SMTP client does **not** currently use STARTTLS or SMTP AUTH when connecting to remote mail servers. It sends mail in plaintext. This is a significant limitation for sending to many modern mail services.
+*   **Basic Error Handling**: While it attempts to classify errors for retries, it's not exhaustive and doesn't deeply parse DSNs (Delivery Status Notifications).
+*   **Not for High Volume or Critical Deliveries**: The system is not designed for high email volume, complex routing scenarios, or situations requiring guaranteed delivery with advanced monitoring.
+*   **Concurrency**: The queue processor is single-threaded (processes one email at a time from the queue scan).
 
 ## Setting up TLS (STARTTLS)
 
-The server supports STARTTLS for upgrading a plain text connection to encrypted TLS.
+The server supports STARTTLS for upgrading a plain text connection to encrypted TLS for *incoming* connections.
 1.  Enable by setting `TLSCertPath` and `TLSKeyPath` in `config.toml`.
-2.  If paths are not set, STARTTLS is disabled.
+2.  If paths are not set, STARTTLS is disabled for incoming connections.
 3.  The server advertises `STARTTLS` in `EHLO` if configured.
 
 ### Generating Self-Signed Certificates (for testing only)
@@ -94,9 +160,9 @@ openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 
 
 ## Setting up SMTP Authentication
 
-Enable SMTP AUTH by defining users in the `[Users]` section of `config.toml`.
+Enable SMTP AUTH for *incoming* connections by defining users in the `[Users]` section of `config.toml`.
 *   Authentication is only advertised and processed over a TLS-secured connection (after STARTTLS).
-*   If `RequireAuth = true` in `config.toml`, clients must authenticate before they can send mail.
+*   If `RequireAuth = true` in `config.toml`, clients must authenticate before they can send mail *through* this server.
 
 1.  **Configure Users and Password Hashes**:
     ```toml
@@ -136,13 +202,13 @@ go build -o gosmtpd .
 ```bash
 ./gosmtpd start
 # With custom config:
-./gosmtpd start --config /path/to/your/config.toml
+./gosmtpd start --config /path/to/your/custom_config.toml
 ```
 Logs are printed to standard output.
 
 ## CLI Commands
 
-*   `./gosmtpd start [-c <config_path>]`: Starts the server.
+*   `./gosmtpd start [-c <config_path>]`: Starts the server and the queue processor.
 *   `./gosmtpd validate-config [-c <config_path>]`: Validates configuration.
 *   `./gosmtpd help`: Shows help.
 
@@ -158,7 +224,7 @@ Logs are printed to standard output.
     *   Server: `220 Ready to start TLS`
     *   Telnet cannot proceed with TLS. Use `openssl s_client` for further testing.
 
-### OpenSSL s_client (Full STARTTLS and AUTH Testing)
+### OpenSSL s_client (Full STARTTLS and AUTH Testing for Incoming Mail)
 
 1.  Connect and initiate STARTTLS:
     ```bash
@@ -212,31 +278,44 @@ Logs are printed to standard output.
     .
     QUIT
     ```
-    Check `MailDir` for the saved email.
+    Check `MailDir` for the saved email (it will now be a `.eml` and `.meta` file pair).
 
 ## Security Notes
-*   **TLS is Essential for AUTH**: SMTP AUTH (PLAIN/LOGIN) sends credentials in a way that is vulnerable if not protected by TLS. This server only advertises AUTH after STARTTLS.
-*   **Bcrypt Hashes**: Passwords in `config.toml` must be bcrypt hashes. Plaintext is not supported.
-*   **Self-Signed Certificates**: Suitable for testing only. They offer encryption but no trust. Use CA-issued certificates for any real-world scenario.
-*   **User Storage**: Storing user credentials in the configuration file is basic. For more users or higher security needs, external user databases (LDAP, SQL DB) are recommended (outside current scope).
-*   **Open Relay**: If `RequireAuth = false` or no users are configured, this server can act as an open relay. Configure carefully and use firewalls appropriately.
+*   **TLS is Essential for Incoming AUTH**: SMTP AUTH (PLAIN/LOGIN) for incoming connections is only advertised and processed by this server after a successful STARTTLS handshake.
+*   **Bcrypt Hashes**: Passwords in `config.toml` must be bcrypt hashes.
+*   **Self-Signed Certificates**: Suitable for testing only.
+*   **User Storage**: Storing user credentials in the configuration file is basic.
+*   **Open Relay**: If `RequireAuth = false` or no users are configured, this server can act as an open relay for *incoming* mail. Configure carefully.
+*   **Outbound Security**: The current outbound SMTP client does **not** use STARTTLS or SMTP AUTH. This is a major security limitation for sending mail to external servers.
 
 ## Limitations
 
-*   **Opportunistic TLS (STARTTLS)**: Relies on client initiation.
-*   **SMTP Authentication Scope**: `AUTH PLAIN` and `AUTH LOGIN` are supported over TLS. Other mechanisms or unencrypted AUTH are not.
-*   **Client Certificate Authentication (mTLS)**: Not supported.
-*   **Basic Error Handling**: For complex SMTP scenarios.
-*   **Single Goroutine Per Connection**: Simple concurrency model.
-*   **No Mail Queue Persistence**: Emails are written directly; no retry for temporary failures.
+*   **Incoming Mail Security**:
+    *   Opportunistic TLS (STARTTLS) for incoming connections relies on client initiation.
+    *   SMTP Authentication Scope for incoming connections: `AUTH PLAIN` and `AUTH LOGIN` are supported over TLS.
+    *   Client Certificate Authentication (mTLS) for incoming connections: Not supported.
+*   **Queuing and Outbound Delivery System (see "Mail Queuing and Outbound Delivery" section for more details)**:
+    *   Basic retry logic, single queue, basic remote response parsing.
+    *   Outbound client sends to one recipient per transaction.
+    *   **No outbound STARTTLS or SMTP AUTH for connections *to* other servers.**
+*   **General**:
+    *   Basic Error Handling: For complex SMTP scenarios.
+    *   Single Goroutine Per Connection (Incoming SMTP): Simple concurrency model.
+    *   Queue Processor Concurrency: Processes one email from the queue at a time.
 
 ## Future Enhancements (Potential)
 
-*   [ ] Implement an option for an Implicit TLS listener (SMTPS on a dedicated port).
-*   [ ] More robust mail queuing system (e.g., retry mechanisms).
-*   [ ] Add hooks or integration points for spam/virus filtering tools.
-*   [ ] Options for daemonization/background running.
-*   [ ] More detailed and configurable logging levels.
-*   [ ] Rate limiting and connection controls.
+*   **Outbound Delivery**:
+    *   Implement STARTTLS and SMTP AUTH for the outbound delivery client.
+    *   More sophisticated retry mechanisms (e.g., exponential backoff, per-domain retry times).
+    *   Enhanced DSN (Delivery Status Notification) parsing and bounce handling.
+    *   Separate queues per destination domain or priority.
+*   **Incoming Mail**:
+    *   Implement an option for an Implicit TLS listener (SMTPS on a dedicated port).
+*   **General**:
+    *   Add hooks or integration points for spam/virus filtering tools.
+    *   Options for daemonization/background running.
+    *   More detailed and configurable logging levels.
+    *   Rate limiting and connection controls.
 
 This README provides a comprehensive guide for users to understand, set up, and use GoSMTPServer.

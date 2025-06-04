@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"go-smtp/config"
+	"go-smtp/queue" // Added for queue processor
 	"go-smtp/smtp"
 
 	"github.com/spf13/cobra"
@@ -41,12 +42,22 @@ var startCmd = &cobra.Command{
 		defer listener.Close()
 		log.Printf("INFO: SMTP server listening on %s", listenAddr)
 
+		// Start the queue processor in a new goroutine
+		go queue.StartProcessor(appConfig)
+
+		// Accept connections in the main goroutine (or this one)
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				log.Printf("ERROR: Error accepting connection: %s", err.Error())
 				// Depending on the error, we might want to continue or break for certain errors
 				// For now, just log and continue accepting
+				// If listener.Accept() returns a non-recoverable error, the server might effectively stop.
+				// For example, if the listener socket is closed.
+				// Consider if this loop should break on certain errors.
+				if opError, ok := err.(*net.OpError); ok && !opError.Temporary() {
+					log.Fatalf("FATAL: Unrecoverable listener error: %v. Shutting down.", err)
+				}
 				continue
 			}
 			// Pass the loaded appConfig to HandleConnection
