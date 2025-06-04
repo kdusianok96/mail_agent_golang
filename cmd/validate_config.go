@@ -32,6 +32,7 @@ var validateConfigCmd = &cobra.Command{
 		log.Printf("  Require Auth: %t", appConfig.RequireAuth)
 		log.Printf("  Queue Scan Interval: %s (parsed: %s)", appConfig.QueueScanIntervalStr, appConfig.QueueScanIntervalDuration.String())
 		log.Printf("  Default Retry Interval: %s (parsed: %s)", appConfig.DefaultRetryIntervalStr, appConfig.DefaultRetryIntervalDuration.String())
+		log.Printf("  Max Retry Interval: %s (parsed: %s)", appConfig.MaxRetryIntervalStr, appConfig.MaxRetryIntervalDuration.String())
 		log.Printf("  Max Delivery Attempts: %d", appConfig.MaxDeliveryAttempts)
 		log.Println("  --- DKIM Configuration ---")
 		log.Printf("  DKIM Enable: %t", appConfig.DKIMEnable)

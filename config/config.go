@@ -23,6 +23,7 @@ type Config struct {
 	// Parsed values, not directly in TOML
 	QueueScanIntervalDuration   time.Duration `toml:"-"`
 	DefaultRetryIntervalDuration time.Duration `toml:"-"`
+	MaxRetryIntervalDuration    time.Duration `toml:"-"` // Added for exponential backoff cap
 
 	// DKIM Configuration
 	DKIMEnable         bool     `toml:"DKIMEnable"`
@@ -36,9 +37,10 @@ type Config struct {
 	OutboundTLSVerifyCert  bool   `toml:"OutboundTLSVerifyCert"`  // Default to true
 
 	// Outbound Relay (Smarthost) Configuration
-	OutboundRelayHost     string `toml:"OutboundRelayHost"`     // e.g., "smtp.example.com:587"
-	OutboundRelayUsername string `toml:"OutboundRelayUsername"`
-	OutboundRelayPassword string `toml:"OutboundRelayPassword"`
+	OutboundRelayHost         string `toml:"OutboundRelayHost"`     // e.g., "smtp.example.com:587"
+	OutboundRelayUsername     string `toml:"OutboundRelayUsername"`
+	OutboundRelayPassword     string `toml:"OutboundRelayPassword"`
+	MaxRetryIntervalStr       string `toml:"MaxRetryInterval"`      // e.g., "12h", "24h"
 	// OutboundRelayAuthMechanism string `toml:"OutboundRelayAuthMechanism"` // Future: "PLAIN", "LOGIN", "CRAM-MD5"
 }
 
@@ -139,6 +141,26 @@ func LoadConfig(filePath string) (*Config, error) {
 			log.Printf("WARN: OutboundRelayUsername (%s) is set, but OutboundRelayPassword is empty. Relay authentication might fail.", cfg.OutboundRelayUsername)
 		}
 	}
+
+	// Parse MaxRetryIntervalStr
+	if cfg.MaxRetryIntervalStr == "" {
+		cfg.MaxRetryIntervalStr = "12h" // Default value
+		log.Printf("WARN: MaxRetryInterval not set in config, using default: %s", cfg.MaxRetryIntervalStr)
+	}
+	parsedMaxRetryInterval, err := time.ParseDuration(cfg.MaxRetryIntervalStr)
+	if err != nil {
+		log.Printf("WARN: Failed to parse MaxRetryInterval '%s': %v. Using default 12h.", cfg.MaxRetryIntervalStr, err)
+		parsedMaxRetryInterval = 12 * time.Hour
+	}
+	cfg.MaxRetryIntervalDuration = parsedMaxRetryInterval
+
+	// Ensure DefaultRetryInterval is not greater than MaxRetryInterval
+	if cfg.DefaultRetryIntervalDuration > cfg.MaxRetryIntervalDuration {
+		log.Printf("WARN: DefaultRetryInterval (%s) is greater than MaxRetryInterval (%s). Setting DefaultRetryInterval to MaxRetryInterval.",
+			cfg.DefaultRetryIntervalDuration, cfg.MaxRetryIntervalDuration)
+		cfg.DefaultRetryIntervalDuration = cfg.MaxRetryIntervalDuration
+	}
+
 
 	return &cfg, nil
 }

@@ -7,6 +7,23 @@ import (
 	"strings"
 	"time"
 
+	"errors" // For errors.As
+	"fmt"    // For formatting error messages
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"errors" // For errors.As
+	"fmt"    // For formatting error messages
+	"log"
+	"math" // For exponential backoff (math.Pow)
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
 	"go-smtp/config"
 	"go-smtp/delivery"
 	"go-smtp/dkim" // Added for DKIM signing
@@ -145,7 +162,7 @@ func processQueueDirectory(cfg *config.Config) {
 		err = delivery.SendEmail(&emailToSend, cfg) // Pass config for outbound policies
 		metadata.LastAttemptTime = time.Now()
 
-		if err == nil {
+		if err == nil { // Success
 			log.Printf("INFO: Email MessageID: %s delivered successfully to recipients: %v. Removing from queue.", metadata.MessageID, metadata.Recipients)
 			if errRem := os.Remove(metaFilePath); errRem != nil {
 				log.Printf("ERROR: Delivered MessageID: %s, but FAILED to remove metadata file %s: %v", metadata.MessageID, metaFilePath, errRem)
@@ -157,23 +174,58 @@ func processQueueDirectory(cfg *config.Config) {
 			} else {
 				log.Printf("INFO: Removed email file %s for delivered MessageID: %s.", emlFilePath, metadata.MessageID)
 			}
-		} else {
-			currentAttempt := metadata.AttemptCount + 1 // This is the attempt that just failed
-			metadata.AttemptCount = currentAttempt     // Update before saving
-			metadata.LastError = err.Error()
+		} else { // Failure
+			currentAttempt := metadata.AttemptCount + 1
+			metadata.AttemptCount = currentAttempt
+			metadata.LastError = err.Error() // Store the full error string
 
-			if metadata.AttemptCount >= cfg.MaxDeliveryAttempts {
-				log.Printf("ERROR: Email MessageID: %s failed permanently after %d/%d attempts. Error: %s. Moving to '%s' directory.",
-					metadata.MessageID, metadata.AttemptCount, cfg.MaxDeliveryAttempts, err.Error(), failedDirName)
-				handlePermanentFailure(cfg.MailDir, metadata, emlFilePath, metaFilePath, err.Error())
+			var smtpErr *delivery.SMTPError
+			isSpecificSMTPError := errors.As(err, &smtpErr)
+
+			if isSpecificSMTPError && smtpErr.IsPermanent {
+				log.Printf("ERROR: Email MessageID: %s received permanent SMTP error %d after %d/%d attempts. Error: %s. Moving to '%s' directory.",
+					metadata.MessageID, smtpErr.Code, currentAttempt, cfg.MaxDeliveryAttempts, smtpErr.Error(), failedDirName)
+				handlePermanentFailure(cfg.MailDir, metadata, emlFilePath, metaFilePath, smtpErr.Error())
 			} else {
-				metadata.NextAttemptTime = time.Now().Add(cfg.DefaultRetryIntervalDuration)
-				if errSave := SaveMetadata(metaFilePath, metadata); errSave != nil {
-					log.Printf("ERROR: Failed to save updated metadata for MessageID: %s after temporary failure (Attempt %d/%d). Error: %v. Email will be re-processed with old state on next scan.",
-						metadata.MessageID, metadata.AttemptCount, cfg.MaxDeliveryAttempts, errSave)
+				// Treat as temporary: specific 4xx SMTP error, or generic error, or permanent SMTP error before max attempts
+				if currentAttempt >= cfg.MaxDeliveryAttempts {
+					errMsg := err.Error()
+					if isSpecificSMTPError { // Could be a 5xx error that just hit max attempts
+						errMsg = fmt.Sprintf("Max attempts reached for SMTP error (Code: %d): %s", smtpErr.Code, smtpErr.Error())
+					} else {
+						errMsg = fmt.Sprintf("Max attempts reached for generic error: %s", err.Error())
+					}
+					log.Printf("ERROR: Email MessageID: %s failed permanently after %d/%d attempts. Final Error: %s. Moving to '%s' directory.",
+						metadata.MessageID, currentAttempt, cfg.MaxDeliveryAttempts, errMsg, failedDirName)
+					handlePermanentFailure(cfg.MailDir, metadata, emlFilePath, metaFilePath, errMsg)
 				} else {
-					log.Printf("WARN: Temporary delivery failure for MessageID: %s (Attempt %d/%d) to %v. Error: %s. Next attempt at: %s. Updated metadata saved.",
-						metadata.MessageID, metadata.AttemptCount, cfg.MaxDeliveryAttempts, metadata.Recipients, err.Error(), metadata.NextAttemptTime.Format(time.RFC3339))
+					// Exponential backoff calculation
+					// AttemptCount is 1 for the first retry (after initial failure)
+					// factor = 2^(AttemptCount-1) -> 2^0=1, 2^1=2, 2^2=4 ...
+					backoffFactor := math.Pow(2, float64(currentAttempt-1))
+					calculatedInterval := time.Duration(float64(cfg.DefaultRetryIntervalDuration) * backoffFactor)
+
+					if calculatedInterval > cfg.MaxRetryIntervalDuration {
+						calculatedInterval = cfg.MaxRetryIntervalDuration
+						log.Printf("INFO: MessageID: %s retry interval capped at MaxRetryInterval (%s)", metadata.MessageID, cfg.MaxRetryIntervalDuration)
+					}
+
+					metadata.NextAttemptTime = time.Now().Add(calculatedInterval)
+
+					if errSave := SaveMetadata(metaFilePath, metadata); errSave != nil {
+						log.Printf("ERROR: Failed to save updated metadata for MessageID: %s after temporary failure (Attempt %d/%d). Error: %v. Email will be re-processed with old state on next scan.",
+							metadata.MessageID, currentAttempt, cfg.MaxDeliveryAttempts, errSave)
+					} else {
+						logMsgFormat := "WARN: Temporary failure for MessageID: %s (Attempt %d/%d) to %v. Error: %s. Calculated retry interval: %s. Next attempt at: %s. Updated metadata saved."
+						if isSpecificSMTPError { // Temporary SMTP error (4xx)
+							log.Printf(logMsgFormat,
+								metadata.MessageID, currentAttempt, cfg.MaxDeliveryAttempts, metadata.Recipients, smtpErr.Error(), calculatedInterval, metadata.NextAttemptTime.Format(time.RFC3339))
+						} else { // Generic network or other error
+							log.Printf(logMsgFormat,
+								metadata.MessageID, currentAttempt, cfg.MaxDeliveryAttempts, metadata.Recipients, err.Error(), calculatedInterval, metadata.NextAttemptTime.Format(time.RFC3339))
+						}
+						}
+					}
 				}
 			}
 		}

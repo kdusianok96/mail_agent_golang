@@ -33,9 +33,11 @@ RequireAuth = false # Set to true to enforce authentication
 # Outbound Mail Delivery Queue Configuration
 QueueScanInterval = "30s"    # How often the queue processor scans for pending emails.
                              # Valid time units: "ns", "us" (or "µs"), "ms", "s", "m", "h".
-DefaultRetryInterval = "5m"  # Default delay before retrying a temporarily failed email.
+DefaultRetryInterval = "5m"  # Default delay before retrying a temporarily failed email. This is the base for exponential backoff.
 MaxDeliveryAttempts = 5      # Maximum number of delivery attempts before an email is moved
                              # to the 'failed' directory. Must be > 0.
+MaxRetryInterval = "12h"     # Maximum delay for a single retry, capping the exponential backoff.
+                             # e.g., "1h", "12h", "24h".
 
 # --- DKIM Signing Configuration ---
 # DomainKeys Identified Mail (DKIM) signs outgoing emails to verify their authenticity.

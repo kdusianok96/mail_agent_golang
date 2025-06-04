@@ -15,9 +15,38 @@ import (
 	"bytes" // For AUTH PLAIN payload construction
 
 	"go-smtp/config" // To access outbound TLS policies
+	"strconv"        // For parsing SMTP codes
+	"errors"         // For errors.As
 )
 
 const clientLogPrefix = "SMTP_CLIENT"
+
+// SMTPError is a custom error type for SMTP-specific errors.
+type SMTPError struct {
+	Code        int    // The integer SMTP status code (e.g., 550, 421)
+	Message     string // The full SMTP response message
+	Err         error  // Underlying error, if any (e.g., for connection issues)
+	IsPermanent bool   // True if it's a 5xx class error
+	IsTemporary bool   // True if it's a 4xx class error
+}
+
+func (e *SMTPError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("SMTP error: code=%d, msg=\"%s\", underlying_err=%v", e.Code, e.Message, e.Err)
+	}
+	return fmt.Sprintf("SMTP error: code=%d, msg=\"%s\"", e.Code, e.Message)
+}
+
+// NewSMTPError creates a new SMTPError
+func NewSMTPError(code int, message string, underlyingErr error) *SMTPError {
+	return &SMTPError{
+		Code:        code,
+		Message:     message,
+		Err:         underlyingErr,
+		IsPermanent: code >= 500 && code < 600,
+		IsTemporary: code >= 400 && code < 500,
+	}
+}
 
 // Email holds the data for an email to be sent.
 type Email struct {
@@ -174,9 +203,27 @@ func sendCommandAndReadResponse(writer *bufio.Writer, reader *bufio.Reader, mxHo
 	response = strings.TrimSpace(response)
 	log.Printf("DEBUG: %s: [OUTBOUND %s] < %s", clientLogPrefix, mxHost, response)
 
-	if expectedCodePrefix != "" && !strings.HasPrefix(response, expectedCodePrefix) {
-		return response, fmt.Errorf("unexpected response for command %s from %s: got '%s', expected prefix '%s'", command, mxHost, response, expectedCodePrefix)
+	if len(response) < 3 {
+		return response, NewSMTPError(0, response, fmt.Errorf("response too short"))
 	}
+	code, convErr := strconv.Atoi(response[0:3])
+	if convErr != nil {
+		return response, NewSMTPError(0, response, fmt.Errorf("failed to parse SMTP code: %w", convErr))
+	}
+
+	if expectedCodePrefix != "" && !strings.HasPrefix(response, expectedCodePrefix) {
+		// Not the expected success code, return it as an SMTPError
+		return response, NewSMTPError(code, response, fmt.Errorf("unexpected SMTP response"))
+	}
+	// If expectedCodePrefix is empty, any valid code is fine (e.g. for initial EHLO read)
+	// but if we are here, it means no error was found by prefix check if one was provided.
+	// If a command expects success (2xx, 3xx) and gets 4xx/5xx, it's an error.
+	// This check is slightly simplified; specific commands expect specific success classes.
+	if (strings.HasPrefix(expectedCodePrefix, "2") || strings.HasPrefix(expectedCodePrefix, "3")) && (code >= 400) {
+		return response, NewSMTPError(code, response, fmt.Errorf("command failed with SMTP error"))
+	}
+
+
 	return response, nil
 }
 
