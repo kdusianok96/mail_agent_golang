@@ -29,6 +29,17 @@ var validateConfigCmd = &cobra.Command{
 		log.Printf("  Mail Directory: %s", appConfig.MailDir)
 		log.Printf("  TLS Cert Path: %s", appConfig.TLSCertPath)
 		log.Printf("  TLS Key Path: %s", appConfig.TLSKeyPath)
+		log.Printf("  Require Auth: %t", appConfig.RequireAuth)
+
+		if len(appConfig.Users) > 0 {
+			userKeys := make([]string, 0, len(appConfig.Users))
+			for k := range appConfig.Users {
+				userKeys = append(userKeys, k)
+			}
+			log.Printf("  Loaded SMTP AUTH users: %v (Passwords are hashed and not displayed)", userKeys)
+		} else {
+			log.Println("  No SMTP AUTH users configured.")
+		}
 	},
 }
 

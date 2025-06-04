@@ -2,9 +2,10 @@ package smtp
 
 import (
 	"bufio"
-	"bufio"       // Will need to re-initialize reader/writer
+	"bytes"        // For splitting AUTH PLAIN payload
 	"crypto/rand"
-	"crypto/tls" // Added for STARTTLS
+	"crypto/tls"   // Added for STARTTLS
+	"encoding/base64" // Added for AUTH
 	"encoding/hex"
 	"fmt"
 	"log" // Added for enhanced logging
@@ -15,34 +16,52 @@ import (
 	"time"
 
 	"go-smtp/config" // Added import for config
+	"golang.org/x/crypto/bcrypt" // Added for password hashing
 )
 
-// const serverHostname = "gosmtp.example.com" // Will be replaced by config
-
 type sessionState struct {
-	clientHostname  string
-	hasSeenHelo     bool
-	mailFromAddress string
-	rcptToAddresses []string
-	isInDataMode    bool           // Technically managed by the DATA command flow itself
-	isTls           bool           // True if STARTTLS has been successfully negotiated
-	cfg             *config.Config // Added to store config
+	clientHostname    string
+	hasSeenHelo       bool
+	mailFromAddress   string
+	rcptToAddresses   []string
+	isInDataMode      bool           // Technically managed by the DATA command flow itself
+	isTls             bool           // True if STARTTLS has been successfully negotiated
+	isAuthenticated   bool           // True if SMTP AUTH was successful
+	authenticatedUser string         // Username if authenticated
+	cfg               *config.Config
 }
 
 func newSessionState(cfg *config.Config) *sessionState {
 	return &sessionState{
-		rcptToAddresses: make([]string, 0),
-		isTls:           false,
-		cfg:             cfg,
+		rcptToAddresses:   make([]string, 0),
+		isTls:             false,
+		isAuthenticated:   false,
+		authenticatedUser: "",
+		cfg:               cfg,
 	}
 }
 
 func (s *sessionState) resetMailState() {
 	s.mailFromAddress = ""
 	s.rcptToAddresses = make([]string, 0)
+	// Note: Authentication state is NOT reset here, only mail transaction state.
+	// RSET command and successful STARTTLS will handle auth state reset.
 }
 
-// HandleConnection now accepts a config object
+func verifyCredentials(username, password string, cfgUsers map[string]string) bool {
+	storedHash, userExists := cfgUsers[username]
+	if !userExists {
+		log.Printf("Auth attempt for non-existent user: %s", username)
+		return false
+	}
+	err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(password))
+	if err == nil {
+		return true // Password matches
+	}
+	log.Printf("Password mismatch for user: %s (err: %v)", username, err)
+	return false
+}
+
 func HandleConnection(conn net.Conn, cfg *config.Config) {
 	clientAddr := conn.RemoteAddr().String()
 	log.Printf("INFO: New connection from %s", clientAddr)
@@ -51,24 +70,19 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 		log.Printf("INFO: Client disconnected: %s", clientAddr)
 	}()
 
-	state := newSessionState(cfg) // Pass config to session state
+	state := newSessionState(cfg)
 
 	welcomeMsg := fmt.Sprintf("220 %s Welcome to GoSMTP\r\n", state.cfg.ServerHostname)
 	log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(welcomeMsg))
-	conn.Write([]byte(welcomeMsg)) // Initial write on the raw connection
+	conn.Write([]byte(welcomeMsg))
 
-	// Use a variable for the current connection, which might be upgraded to TLS
 	currentConn := conn
 	reader := bufio.NewReader(currentConn)
-	// Writer is not explicitly used for sending responses directly in this loop,
-	// but if it were, it would also need to be updated after STARTTLS.
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err.Error() == "EOF" || strings.Contains(err.Error(), "use of closed network connection") {
-				// log.Printf("INFO: Client %s disconnected (EOF or closed connection)", clientAddr)
-				// Defer will handle logging disconnect
 			} else {
 				log.Printf("ERROR: Error reading from client %s: %s", clientAddr, err.Error())
 			}
@@ -77,26 +91,30 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 
 		commandLine := strings.TrimSpace(line)
 		if commandLine == "" {
-			continue // Ignore empty lines
+			continue
 		}
 		log.Printf("RECV [%s]: %s", clientAddr, commandLine)
 
 		parts := strings.Fields(commandLine)
 		if len(parts) == 0 {
-			// Should not happen if commandLine is not empty, but good practice
 			continue
 		}
 		command := strings.ToUpper(parts[0])
-		var response string // To store and log the response
+		var response string
 
 		switch command {
 		case "QUIT":
 			response = "221 Bye\r\n"
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
 			log.Printf("INFO: Client %s issued QUIT command.", clientAddr)
 			return
 		case "HELO":
+			if state.isAuthenticated { // Require re-auth after HELO if already authed, or reset auth. Simpler to reset.
+				log.Printf("INFO [%s]: Resetting auth state due to HELO after authentication.", clientAddr)
+				state.isAuthenticated = false
+				state.authenticatedUser = ""
+			}
 			if len(parts) < 2 {
 				response = "501 Syntax error in parameters or arguments\r\n"
 			} else {
@@ -105,12 +123,17 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 				response = fmt.Sprintf("250 %s Hello %s\r\n", state.cfg.ServerHostname, state.clientHostname)
 			}
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-			conn.Write([]byte(response))
+			currentConn.Write([]byte(response))
 		case "EHLO":
+			if state.isAuthenticated { // Require re-auth after EHLO if already authed, or reset auth. Simpler to reset.
+				log.Printf("INFO [%s]: Resetting auth state due to EHLO after authentication.", clientAddr)
+				state.isAuthenticated = false
+				state.authenticatedUser = ""
+			}
 			if len(parts) < 2 {
 				response = "501 Syntax error in parameters or arguments\r\n"
 				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
-				conn.Write([]byte(response))
+				currentConn.Write([]byte(response))
 				continue
 			}
 			state.clientHostname = parts[1]
@@ -119,18 +142,209 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(respBase))
 			currentConn.Write([]byte(respBase))
 
-			// Advertise STARTTLS if configured and not already in TLS mode
 			if state.cfg.TLSCertPath != "" && state.cfg.TLSKeyPath != "" && !state.isTls {
 				starttlsAdvert := "250-STARTTLS\r\n"
 				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(starttlsAdvert))
 				currentConn.Write([]byte(starttlsAdvert))
 			}
-
-			// Other capabilities
-			respPipelinig := "250 PIPELINING\r\n" // Example capability, always send this as the last one with 250 instead of 250-
+			if state.isTls && len(state.cfg.Users) > 0 {
+				authAdvert := "250-AUTH PLAIN LOGIN\r\n"
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(authAdvert))
+				currentConn.Write([]byte(authAdvert))
+			}
+			respPipelinig := "250 PIPELINING\r\n"
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(respPipelinig))
 			currentConn.Write([]byte(respPipelinig))
+
+		case "AUTH":
+			if !state.isTls {
+				response = "538 Encryption required for requested authentication mechanism\r\n"
+				log.Printf("WARN [%s]: AUTH attempt without TLS.", clientAddr)
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				continue
+			}
+			if state.isAuthenticated {
+				response = "503 Bad sequence of commands (already authenticated)\r\n"
+				log.Printf("WARN [%s]: AUTH attempt when already authenticated as %s.", clientAddr, state.authenticatedUser)
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				continue
+			}
+			if len(state.cfg.Users) == 0 {
+				response = "454 4.7.0 Temporary authentication failure (no users configured)\r\n" // 504 might also be used
+				log.Printf("WARN [%s]: AUTH attempt but no users configured.", clientAddr)
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				continue
+			}
+
+			authParts := parts // commandLine was already split into parts
+			if len(authParts) < 2 {
+				response = "501 Syntax error in parameters or arguments (AUTH mechanism)\r\n"
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				continue
+			}
+			mechanism := strings.ToUpper(authParts[1])
+
+			switch mechanism {
+			case "PLAIN":
+				var plainAuthData string
+				if len(authParts) > 2 { // AUTH PLAIN <initial-response>
+					plainAuthData = authParts[2]
+				} else { // AUTH PLAIN, expect client to send data next
+					promptResp := "334 \r\n" // Empty prompt
+					log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(promptResp))
+					currentConn.Write([]byte(promptResp))
+					payloadLine, err := reader.ReadString('\n')
+					if err != nil {
+						log.Printf("ERROR [%s]: Error reading AUTH PLAIN payload: %v", clientAddr, err)
+						return // Connection likely dropped
+					}
+					plainAuthData = strings.TrimSpace(payloadLine)
+					log.Printf("RECV [%s]: %s (AUTH PLAIN payload)", clientAddr, plainAuthData)
+				}
+
+				decodedBytes, err := base64.StdEncoding.DecodeString(plainAuthData)
+				if err != nil {
+					response = "501 Syntax error in parameters or arguments (bad base64 for PLAIN)\r\n"
+					log.Printf("WARN [%s]: AUTH PLAIN with bad base64: %s", clientAddr, plainAuthData)
+					log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+					currentConn.Write([]byte(response))
+					continue
+				}
+
+				authFields := bytes.Split(decodedBytes, []byte{0})
+				if len(authFields) != 3 {
+					response = "501 Syntax error in parameters or arguments (malformed PLAIN payload)\r\n"
+					log.Printf("WARN [%s]: AUTH PLAIN malformed payload, expected 3 parts, got %d", clientAddr, len(authFields))
+					log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+					currentConn.Write([]byte(response))
+					continue
+				}
+				// authorizationID := string(authFields[0]) // We don't use authorization_id
+				username := string(authFields[1])
+				password := string(authFields[2])
+
+				if verifyCredentials(username, password, state.cfg.Users) {
+					state.isAuthenticated = true
+					state.authenticatedUser = username
+					response = "235 2.7.0 Authentication Succeeded\r\n"
+					log.Printf("INFO [%s]: User '%s' authenticated successfully via AUTH PLAIN.", clientAddr, username)
+				} else {
+					response = "535 5.7.8 Authentication credentials invalid\r\n"
+					log.Printf("WARN [%s]: User '%s' failed AUTH PLAIN.", clientAddr, username)
+				}
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+
+			case "LOGIN":
+				var username string
+				if len(authParts) > 2 { // AUTH LOGIN <initial-username-base64>
+					usernameB64 := authParts[2]
+					log.Printf("RECV [%s]: %s (AUTH LOGIN initial username b64)", clientAddr, usernameB64)
+					usernameBytes, err := base64.StdEncoding.DecodeString(usernameB64)
+					if err != nil {
+						response = "501 Syntax error (bad base64 initial username for LOGIN)\r\n"
+						log.Printf("WARN [%s]: AUTH LOGIN with bad base64 initial username: %s", clientAddr, usernameB64)
+						log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+						currentConn.Write([]byte(response))
+						continue
+					}
+					username = string(usernameBytes)
+				} else { // AUTH LOGIN, prompt for username
+					usernamePrompt := "334 VXNlcm5hbWU6\r\n" // "Username:"
+					log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(usernamePrompt))
+					currentConn.Write([]byte(usernamePrompt))
+
+					usernameLine, err := reader.ReadString('\n')
+					if err != nil {
+						log.Printf("ERROR [%s]: Error reading username for AUTH LOGIN: %v", clientAddr, err)
+						return
+					}
+					usernameLine = strings.TrimSpace(usernameLine)
+					log.Printf("RECV [%s]: %s (AUTH LOGIN username b64)", clientAddr, usernameLine)
+					if usernameLine == "*" {
+						response = "501 Authentication canceled by client\r\n"
+						log.Printf("INFO [%s]: AUTH LOGIN canceled by client at username prompt.", clientAddr)
+						log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+						currentConn.Write([]byte(response))
+						continue
+					}
+					usernameBytes, err := base64.StdEncoding.DecodeString(usernameLine)
+					if err != nil {
+						response = "501 Syntax error (bad base64 username for LOGIN)\r\n"
+						log.Printf("WARN [%s]: AUTH LOGIN with bad base64 username: %s", clientAddr, usernameLine)
+						log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+						currentConn.Write([]byte(response))
+						continue
+					}
+					username = string(usernameBytes)
+				}
+
+				passwordPrompt := "334 UGFzc3dvcmQ6\r\n" // "Password:"
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(passwordPrompt))
+				currentConn.Write([]byte(passwordPrompt))
+
+				passwordLine, err := reader.ReadString('\n')
+				if err != nil {
+					log.Printf("ERROR [%s]: Error reading password for AUTH LOGIN: %v", clientAddr, err)
+					return
+				}
+				passwordLine = strings.TrimSpace(passwordLine)
+				log.Printf("RECV [%s]: **** (AUTH LOGIN password b64 - not logged for security)", clientAddr)
+				if passwordLine == "*" {
+					response = "501 Authentication canceled by client\r\n"
+					log.Printf("INFO [%s]: AUTH LOGIN canceled by client at password prompt.", clientAddr)
+					log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+					currentConn.Write([]byte(response))
+					continue
+				}
+				passwordBytes, err := base64.StdEncoding.DecodeString(passwordLine)
+				if err != nil {
+					response = "501 Syntax error (bad base64 password for LOGIN)\r\n"
+					log.Printf("WARN [%s]: AUTH LOGIN with bad base64 password.", clientAddr)
+					log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+					currentConn.Write([]byte(response))
+					continue
+				}
+				password := string(passwordBytes)
+
+				if verifyCredentials(username, password, state.cfg.Users) {
+					state.isAuthenticated = true
+					state.authenticatedUser = username
+					response = "235 2.7.0 Authentication Succeeded\r\n"
+					log.Printf("INFO [%s]: User '%s' authenticated successfully via AUTH LOGIN.", clientAddr, username)
+				} else {
+					response = "535 5.7.8 Authentication credentials invalid\r\n"
+					log.Printf("WARN [%s]: User '%s' failed AUTH LOGIN.", clientAddr, username)
+				}
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+
+			default:
+				response = "504 5.5.4 Unrecognized authentication type\r\n"
+				log.Printf("WARN [%s]: Unsupported AUTH mechanism: %s", clientAddr, mechanism)
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+			}
 		case "MAIL":
+			// RFC 4954 Section 5: MAIL command is not permitted during an authentication exchange.
+			// (Our AUTH implementation is blocking, so this is implicitly handled)
+			// RFC 4954 Section 6: MAIL command requires authentication if server policy dictates.
+			// For now, we don't enforce auth for MAIL FROM if users are configured, but this is where it would go.
+			// Example: if len(state.cfg.Users) > 0 && !state.isAuthenticated { respond 530 Authentication required; continue }
+
+			// Authentication Check
+			if state.cfg.RequireAuth && len(state.cfg.Users) > 0 && !state.isAuthenticated {
+				response = "530 5.7.0 Authentication required\r\n"
+				log.Printf("WARN [%s]: MAIL FROM rejected. Authentication required but not performed.", clientAddr)
+				log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
+				currentConn.Write([]byte(response))
+				continue
+			}
+
 			if !state.hasSeenHelo {
 				response = "503 Bad sequence of commands (HELO/EHLO first)\r\n"
 				log.Printf("WARN [%s]: MAIL before HELO/EHLO", clientAddr)
@@ -206,29 +420,24 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 			err = tlsConn.Handshake()
 			if err != nil {
 				log.Printf("ERROR [%s]: TLS handshake failed: %v", clientAddr, err)
-				// Connection is likely broken or will be closed by tls.Server internals on error.
-				// No further SMTP response can be reliably sent. Close and return.
-				currentConn.Close() // Ensure original connection is closed if handshake wrapper doesn't.
+				currentConn.Close()
 				return
 			}
-			// log.Printf("INFO [%s]: TLS handshake successful.", clientAddr) // Covered by the next log
 
-			currentConn = tlsConn // Upgrade current connection to TLS wrapped version
-			reader = bufio.NewReader(currentConn) // Reset reader with new TLS connection
+			currentConn = tlsConn
+			reader = bufio.NewReader(currentConn)
 
-			// Reset SMTP state as per RFC 3207 Section 4
-			// log.Printf("INFO [%s]: Resetting SMTP session state after successful STARTTLS.", clientAddr) // Covered by the next log
 			state.isTls = true
 			state.hasSeenHelo = false
 			state.clientHostname = ""
 			state.mailFromAddress = ""
-			state.rcptToAddresses = make([]string, 0) // Clear recipients
-			state.isInDataMode = false                // Should not be in data mode anyway here
+			state.rcptToAddresses = make([]string, 0)
+			state.isInDataMode = false
+			state.isAuthenticated = false // Reset auth state after STARTTLS
+			state.authenticatedUser = ""  // Reset auth user after STARTTLS
 
 			log.Printf("INFO [%s]: Connection successfully upgraded to TLS and session state reset. Client should re-EHLO.", clientAddr)
-
-			// No explicit SMTP response here, client should re-EHLO.
-			continue // Continue the loop to read the next command (expected to be EHLO)
+			continue
 
 		case "DATA":
 			if len(state.rcptToAddresses) == 0 {
@@ -250,7 +459,7 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 					log.Printf("ERROR [%s]: Error reading data: %s", clientAddr, err.Error())
 					state.isInDataMode = false
 					state.resetMailState()
-					return // Abort connection on error during DATA
+					return
 				}
 
 				trimmedLine := strings.TrimRight(dataLine, "\r\n")
@@ -316,9 +525,11 @@ func HandleConnection(conn net.Conn, cfg *config.Config) {
 		case "RSET":
 			log.Printf("INFO [%s]: Session reset initiated by RSET command.", clientAddr)
 			state.resetMailState()
-			// Per RFC 2228, RSET does not affect TLS state.
-			// state.hasSeenHelo = false  // This is part of resetMailState() if we want RSET to clear HELO
-			// state.clientHostname = ""
+			state.isAuthenticated = false // Reset authentication state
+			state.authenticatedUser = ""
+			state.hasSeenHelo = false // RSET should also clear HELO state
+			state.clientHostname = ""
+			log.Printf("INFO [%s]: Authentication and HELO state reset due to RSET.", clientAddr)
 			response = "250 OK\r\n"
 			log.Printf("SENT [%s]: %s", clientAddr, strings.TrimSpace(response))
 			currentConn.Write([]byte(response))

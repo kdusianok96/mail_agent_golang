@@ -13,6 +13,8 @@ type Config struct {
 	MailDir         string `toml:"MailDir"`
 	TLSCertPath     string `toml:"TLSCertPath"` // Path to TLS certificate file
 	TLSKeyPath      string `toml:"TLSKeyPath"`  // Path to TLS private key file
+	Users           map[string]string `toml:"Users"`   // Username to bcrypt hashed password
+	RequireAuth     bool   `toml:"RequireAuth"` // If true, AUTH is required for MAIL FROM if users are configured and connection is secure
 }
 
 // LoadConfig reads a TOML configuration file and unmarshals it into a Config struct.

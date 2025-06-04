@@ -8,3 +8,24 @@ MailDir = "maildata"
 # If either TLSCertPath or TLSKeyPath is empty, TLS will be disabled.
 TLSCertPath = "server.crt" # Path to TLS certificate file (e.g., fullchain.pem)
 TLSKeyPath = "server.key"  # Path to TLS private key file (e.g., privkey.pem)
+
+# SMTP User Authentication (optional)
+# Define users and their bcrypt hashed passwords for SMTP AUTH.
+# If the [Users] section is missing or empty, SMTP AUTH will effectively be disabled
+# as there will be no users to authenticate against.
+[Users]
+# To generate a bcrypt hash for a password, you can use a simple Go program
+# (see README.md for an example) or an online bcrypt generator.
+# Ensure the cost factor used for hashing is reasonable (e.g., 10-12).
+#
+# Example users (replace with your actual usernames and bcrypt hashes):
+# testuser1 = "$2a$10$YourBcryptHashForUser1PasswordGoesHere"
+# anotheruser = "$2a$10$AnotherBcryptHashForPasswordHere"
+
+# Require Authentication
+# If true, and if users are defined in the [Users] section,
+# the server will require clients to authenticate via SMTP AUTH (typically after STARTTLS)
+# before accepting MAIL FROM commands.
+# If false, or if no users are defined, MAIL FROM will be accepted without AUTH.
+# For a server that accepts external mail, this should generally be true.
+RequireAuth = false # Set to true to enforce authentication

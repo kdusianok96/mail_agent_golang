@@ -7,4 +7,5 @@ require (
 	github.com/spf13/cobra v1.8.0 // Manually added for CLI
 	github.com/spf13/pflag v1.0.5 // Cobra dependency, often good to make it explicit
 	github.com/inconshreveable/mousetrap v1.1.0 // Cobra dependency
+	golang.org/x/crypto v0.21.0 // Manually added for bcrypt
 )
