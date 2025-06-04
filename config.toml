@@ -1,0 +1,4 @@
+ListenInterface = "0.0.0.0"
+ListenPort = 2525
+ServerHostname = "gosmtp.example.com"
+MailDir = "maildata"
