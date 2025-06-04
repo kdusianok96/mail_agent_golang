@@ -33,6 +33,13 @@ var validateConfigCmd = &cobra.Command{
 		log.Printf("  Queue Scan Interval: %s (parsed: %s)", appConfig.QueueScanIntervalStr, appConfig.QueueScanIntervalDuration.String())
 		log.Printf("  Default Retry Interval: %s (parsed: %s)", appConfig.DefaultRetryIntervalStr, appConfig.DefaultRetryIntervalDuration.String())
 		log.Printf("  Max Delivery Attempts: %d", appConfig.MaxDeliveryAttempts)
+		log.Println("  --- DKIM Configuration ---")
+		log.Printf("  DKIM Enable: %t", appConfig.DKIMEnable)
+		log.Printf("  DKIM Domain: %s", appConfig.DKIMDomain)
+		log.Printf("  DKIM Selector: %s", appConfig.DKIMSelector)
+		log.Printf("  DKIM Private Key Path: %s", appConfig.DKIMPrivateKeyPath)
+		log.Printf("  DKIM Headers: %v", appConfig.DKIMHeaders)
+
 
 		if len(appConfig.Users) > 0 {
 			userKeys := make([]string, 0, len(appConfig.Users))

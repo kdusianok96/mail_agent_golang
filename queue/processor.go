@@ -9,6 +9,7 @@ import (
 
 	"go-smtp/config"
 	"go-smtp/delivery"
+	"go-smtp/dkim" // Added for DKIM signing
 )
 
 // const (
@@ -110,11 +111,38 @@ func processQueueDirectory(cfg *config.Config) {
 		emailToSend := delivery.Email{
 			From:     metadata.Sender,
 			To:       metadata.Recipients,
-			Data:     emailData,
-			Hostname: cfg.ServerHostname, // Use server's configured hostname for EHLO
+			Data:     emailData, // Original email data
+			Hostname: cfg.ServerHostname,
 		}
 
-		err = delivery.SendEmail(&emailToSend)
+		// Attempt DKIM signing if enabled and configured
+		currentEmailData := emailData // Start with original data
+		if cfg.DKIMEnable {
+			if cfg.DKIMDomain != "" && cfg.DKIMSelector != "" && cfg.DKIMPrivateKeyPath != "" {
+				log.Printf("INFO: MessageID: %s attempting DKIM signing. Domain: %s, Selector: %s", metadata.MessageID, cfg.DKIMDomain, cfg.DKIMSelector)
+
+				dkimOpts := dkim.DKIMSignOptions{
+					Domain:         cfg.DKIMDomain,
+					Selector:       cfg.DKIMSelector,
+					PrivateKeyPath: cfg.DKIMPrivateKeyPath,
+					HeadersToSign:  cfg.DKIMHeaders,
+				}
+
+				signedEmailData, signErr := dkim.SignEmail(currentEmailData, dkimOpts) // Pass a copy if SignEmail modifies in place and you need original
+				if signErr != nil {
+					log.Printf("ERROR: MessageID: %s failed DKIM signing. Error: %v. Sending email unsigned.", metadata.MessageID, signErr)
+					// emailToSend.Data remains originalEmailData
+				} else {
+					log.Printf("INFO: MessageID: %s successfully signed with DKIM.", metadata.MessageID)
+					emailToSend.Data = signedEmailData // Use the signed email data
+				}
+			} else {
+				log.Printf("WARN: MessageID: %s DKIM signing enabled but not all required DKIM configurations (Domain, Selector, PrivateKeyPath) are set. Sending unsigned.", metadata.MessageID)
+			}
+		}
+		// emailToSend.Data now contains either the original or DKIM-signed data
+
+		err = delivery.SendEmail(&emailToSend) // Send the (potentially signed) email
 		metadata.LastAttemptTime = time.Now()
 
 		if err == nil {

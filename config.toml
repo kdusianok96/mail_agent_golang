@@ -36,3 +36,16 @@ QueueScanInterval = "30s"    # How often the queue processor scans for pending e
 DefaultRetryInterval = "5m"  # Default delay before retrying a temporarily failed email.
 MaxDeliveryAttempts = 5      # Maximum number of delivery attempts before an email is moved
                              # to the 'failed' directory. Must be > 0.
+
+# --- DKIM Signing Configuration ---
+# DomainKeys Identified Mail (DKIM) signs outgoing emails to verify their authenticity.
+DKIMEnable = false                 # Set to true to enable DKIM signing for outgoing emails.
+DKIMDomain = "yourdomain.com"      # The domain to sign emails for (e.g., the domain in your From address).
+                                   # This domain should have the DKIM public key in its DNS records.
+DKIMSelector = "default"           # The DKIM selector used in DNS queries (e.g., "default._domainkey.yourdomain.com").
+                                   # If empty and DKIMEnable is true, "default" will be used.
+DKIMPrivateKeyPath = "/etc/gosmtpd/dkim/private.key" # Path to your DKIM RSA private key file.
+                                                     # Ensure this file is readable by the server process and kept secure.
+# DKIMHeaders = ["From", "To", "Cc", "Subject", "Date", "Message-ID"] # Optional: specific headers to include in the signature.
+                                                                     # Most libraries have sensible defaults if this is omitted or empty.
+                                                                     # Over-specifying can sometimes break signatures if headers are modified by intermediate MTAs.
