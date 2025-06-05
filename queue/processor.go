@@ -37,13 +37,14 @@ import (
 const ( // Keep directory names as constants for now, or move to config if desired later
 	corruptDirName = "corrupt"
 	failedDirName  = "failed"
+	"context" // For graceful shutdown
+	"sync"    // For WaitGroup
 )
 
 // StartProcessor launches the queue processing goroutine.
-func StartProcessor(cfg *config.Config) {
-	// Log message already good, uses configured values:
-	// log.Printf("INFO: Queue processor configured with ScanInterval: %s, RetryInterval: %s, MaxAttempts: %d",
-	// cfg.QueueScanIntervalDuration, cfg.DefaultRetryIntervalDuration, cfg.MaxDeliveryAttempts)
+// It now accepts a context for shutdown signaling and a WaitGroup.
+func StartProcessor(ctx context.Context, cfg *config.Config, wg *sync.WaitGroup) {
+	defer wg.Done() // Signal that this goroutine has finished when it returns
 	// The above log is already present from the previous step. Let's ensure it's exactly as required or adjust.
 	// The previous step added:
 	// log.Printf("INFO: Queue processor configured with ScanInterval: %s, RetryInterval: %s, MaxAttempts: %d",
@@ -53,34 +54,38 @@ func StartProcessor(cfg *config.Config) {
 	log.Printf("INFO: Configuration - ScanInterval: %s, RetryInterval: %s, MaxAttempts: %d",
 		cfg.QueueScanIntervalDuration, cfg.DefaultRetryIntervalDuration, cfg.MaxDeliveryAttempts)
 
-	// Ensure essential directories exist or can be created
+	// Ensure essential directories exist (Startup check, might be redundant if cmd/start also checks)
+	// For robustness, ensure MailDir exists before starting ticker.
 	if err := os.MkdirAll(cfg.MailDir, 0750); err != nil {
-		log.Fatalf("FATAL: MailDir %s cannot be created/accessed: %v", cfg.MailDir, err)
+		log.Printf("ERROR: Queue Processor: MailDir %s cannot be created/accessed: %v. Processor will not start.", cfg.MailDir, err)
+		return // Cannot operate without MailDir
 	}
-	if err := os.MkdirAll(filepath.Join(cfg.MailDir, corruptDirName), 0750); err != nil {
-		log.Fatalf("FATAL: Corrupt directory in MailDir %s cannot be created/accessed: %v", cfg.MailDir, err)
-	}
-	if err := os.MkdirAll(filepath.Join(cfg.MailDir, failedDirName), 0750); err != nil {
-		log.Fatalf("FATAL: Failed directory in MailDir %s cannot be created/accessed: %v", cfg.MailDir, err)
-	}
+	// Sub-directories (corrupt, failed) will be created by processQueueDirectory/handlePermanentFailure as needed.
 
-
-	log.Printf("INFO: Queue processor configured with ScanInterval: %s, RetryInterval: %s, MaxAttempts: %d",
-		cfg.QueueScanIntervalDuration, cfg.DefaultRetryIntervalDuration, cfg.MaxDeliveryAttempts)
 
 	ticker := time.NewTicker(cfg.QueueScanIntervalDuration)
 	defer ticker.Stop()
+	log.Println("INFO: Queue processor started successfully.")
+
 
 	for {
 		select {
+		case <-ctx.Done(): // Context cancelled, initiate shutdown
+			log.Println("INFO: Queue processor received shutdown signal. Stopping.")
+			// Optional: Perform a final quick scan or allow current processing to finish if it's complex.
+			// For this version, we simply stop the ticker and return.
+			// If processQueueDirectory itself is long-running and doesn't check ctx, it might delay shutdown.
+			return
 		case <-ticker.C:
 			log.Println("INFO: Queue processor tick: scanning for emails...")
-			processQueueDirectory(cfg)
+			processQueueDirectory(cfg) // Assuming this function is not indefinitely blocking
 		}
 	}
 }
 
 // processQueueDirectory scans the MailDir for .meta files and processes them.
+// TODO: Consider passing context to processQueueDirectory if individual email processing can be lengthy
+// and needs to be interruptible. For now, it processes the whole batch found at scan time.
 func processQueueDirectory(cfg *config.Config) {
 	metaFilePattern := filepath.Join(cfg.MailDir, "*.meta")
 	metaFiles, err := filepath.Glob(metaFilePattern)

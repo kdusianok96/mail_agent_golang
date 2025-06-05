@@ -3,6 +3,11 @@ ListenPort = 2525
 ServerHostname = "gosmtp.example.com"
 MailDir = "maildata"
 
+# --- Logging Configuration ---
+# Path to the log file. If empty or set to "-", logs will be written to standard output (stdout).
+# If a path is provided, ensure the directory exists and the user running gosmtpd has write permissions.
+LogFilePath = "" # Example: "/var/log/gosmtpd/gosmtpd.log" or "gosmtpd.log" for current directory
+
 # --- Incoming Connection Security ---
 TLSCertPath = "server.crt"
 TLSKeyPath = "server.key"
@@ -41,46 +46,11 @@ MaxCommandsPerSession = 200
 MaxRecipientsPerMessage = 100
 
 # --- Incoming Email Filtering (Content Scanning) ---
-# Enable external script-based filtering for incoming mail.
 IncomingFilterEnable = false
-
-# Path to the external filter script.
-# The script will receive raw email content (including all headers and body) via STDIN.
-# Expected script exit codes:
-#   0: Email is clean, proceed with normal delivery.
-#   1: Email is considered spam/malicious (or any other category requiring action).
-#   Other non-zero exit codes might also be treated as detection, or could indicate script error.
-# STDOUT from the script can be used to pass back header lines (one per line, e.g., "X-Spam-Score: 10.0")
-# to be prepended to the email if the action is "add_header".
 IncomingFilterScriptPath = "/usr/local/bin/email_scanner.sh"
-
-# Timeout for the filter script execution (e.g., "10s", "30s", "1m"). Default "30s".
 IncomingFilterScriptTimeout = "30s"
-
-# Optional arguments to pass to the script. Email data is always passed via STDIN.
-# Example: IncomingFilterScriptArgs = ["--mode=detailed", "--level=3"]
-IncomingFilterScriptArgs = []
-
-# Action to take if the script detects an issue (e.g., exits with code 1).
-# Options:
-#   "reject"     - Reject the email with an SMTP error (see IncomingFilterRejectMessage).
-#   "add_header" - (Default) Prepend headers from script STDOUT to the email and accept it for delivery/queuing.
-#                  If script STDOUT is empty, a default header (see IncomingFilterHeaderName) might be added.
-#   "quarantine" - Move the email to IncomingFilterQuarantineDir instead of the main MailDir queue.
-IncomingFilterActionOnDetection = "add_header"
-
-# SMTP message to use if IncomingFilterActionOnDetection is "reject".
-# Default: "554 5.7.1 Message content rejected due to policy."
+# IncomingFilterScriptArgs = ["--config", "/etc/scanner.conf"]
+IncomingFilterActionOnDetection = "add_header" # "reject", "add_header", or "quarantine"
 IncomingFilterRejectMessage = "554 5.7.1 Message content rejected by content filter."
-
-# Header name to add if action is "add_header" AND the script signals detection (e.g., non-zero exit)
-# BUT does not provide any specific headers via its STDOUT. The value for this header could be generic,
-# like "Detected by content filter".
-# If the script provides its own headers (e.g., "X-Spam-Status: Yes"), those are used directly.
-# Default: "X-GoSMTPServer-Scan-Result" (with a value like "Positive" or "Detected")
 IncomingFilterHeaderName = "X-Content-Scan-Result"
-
-# Directory to move emails to if action is "quarantine" and detection occurs.
-# Ensure this directory is writable by the server and ideally different from MailDir.
-# If empty and action is "quarantine", it's a misconfiguration.
 IncomingFilterQuarantineDir = "/var/spool/gosmtpd/quarantine"

@@ -65,6 +65,9 @@ type Config struct {
 	IncomingFilterHeaderName        string   `toml:"IncomingFilterHeaderName"`
 	IncomingFilterQuarantineDir     string   `toml:"IncomingFilterQuarantineDir"`
 	IncomingFilterScriptTimeoutDuration time.Duration `toml:"-"`
+
+	// Logging
+	LogFilePath string `toml:"LogFilePath"` // Empty or "-" means stdout, otherwise path to log file.
 }
 
 // newConfigWithDefaults creates a Config with default values set before TOML unmarshalling.
@@ -72,6 +75,7 @@ type Config struct {
 func newConfigWithDefaults() Config {
 	return Config{
 		OutboundTLSVerifyCert: true, // Default to true
+		// LogFilePath defaults to "" (empty string), which setupLogging will interpret as stdout.
 	}
 }
 
@@ -198,6 +202,8 @@ func LoadConfig(filePath string) (*Config, error) {
 			log.Printf("ERROR: IncomingFilterActionOnDetection is 'quarantine', but IncomingFilterQuarantineDir is not set. Quarantine action will likely fail or be disabled.")
 		}
 	}
+	// LogFilePath is loaded as a string. Its default interpretation (empty string for stdout)
+	// is handled by the setupLogging function.
 
 	return &cfg, nil
 }

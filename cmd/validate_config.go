@@ -65,6 +65,8 @@ var validateConfigCmd = &cobra.Command{
 		log.Printf("  Incoming Filter Reject Message: %s", appConfig.IncomingFilterRejectMessage)
 		log.Printf("  Incoming Filter Header Name: %s", appConfig.IncomingFilterHeaderName)
 		log.Printf("  Incoming Filter Quarantine Dir: %s", appConfig.IncomingFilterQuarantineDir)
+		log.Println("  --- Logging ---")
+		log.Printf("  Log File Path: %s (Effective: %s)", appConfig.LogFilePath, determineEffectiveLogPath(appConfig.LogFilePath))
 
 
 		if len(appConfig.Users) > 0 {
@@ -79,10 +81,14 @@ var validateConfigCmd = &cobra.Command{
 	},
 }
 
+// determineEffectiveLogPath is a helper for display purposes in validate-config
+func determineEffectiveLogPath(logPath string) string {
+	if logPath == "" || logPath == "-" {
+		return "stdout"
+	}
+	return logPath
+}
+
 func init() {
 	RootCmd.AddCommand(validateConfigCmd)
-
-	// You could add flags specific to validate-config if needed
-	// For example, a flag to only validate syntax without printing values:
-	// validateConfigCmd.Flags().Bool("syntax-only", false, "Only validate syntax, do not print values")
 }

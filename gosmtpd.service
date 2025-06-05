@@ -1,0 +1,107 @@
+[Unit]
+Description=GoSMTPServer - A basic SMTP server in Go
+Documentation=https://github.com/your-repo/gosmtpd/blob/main/README.md <--- UPDATE THIS URL
+After=network.target auditd.service
+# If your server relies on specific mounts being available (e.g. for MailDir), add them here:
+# RequiresMountsFor=/var/spool/gosmtpd
+
+[Service]
+# --- Paths and User ---
+# Adjust User, Group, ExecStart, WorkingDirectory, and config path as needed.
+# It's recommended to run GoSMTPServer as a dedicated non-root user.
+# Example: Create a user and group 'gosmtpd':
+#   sudo groupadd --system gosmtpd
+#   sudo useradd --system -g gosmtpd -d /opt/gosmtpd -s /usr/sbin/nologin -c "GoSMTPServer Service User" gosmtpd
+
+User=gosmtpd
+Group=gosmtpd
+
+# Path to the GoSMTPServer executable and its configuration file.
+# Ensure the binary is executable (chmod +x gosmtpd).
+# Option 1: Absolute paths (recommended for system services)
+ExecStart=/usr/local/bin/gosmtpd start --config /etc/gosmtpd/config.toml
+# Option 2: Binary in a common PATH, config relative to WorkingDirectory
+# ExecStart=gosmtpd start --config config.toml
+
+# Working directory for the service.
+# If using relative paths in config.toml (e.g., for MailDir), they will be relative to this.
+# Absolute paths in config.toml are generally safer for services.
+WorkingDirectory=/opt/gosmtpd
+
+# --- Logging ---
+# GoSMTPServer can log to stdout/stderr or a file based on its config.toml (LogFilePath).
+# For systemd, using journald is often preferred.
+#
+# If LogFilePath in config.toml is empty or "-", GoSMTPServer logs to its stdout/stderr.
+# In this case, systemd will capture it into the journal with these settings:
+StandardOutput=journal
+StandardError=journal
+#
+# If LogFilePath in config.toml *is* set to a file (e.g., /var/log/gosmtpd/gosmtpd.log):
+# - GoSMTPServer will write directly to that file.
+# - If you also want systemd to capture this via its stdout/stderr wrappers (which might be
+#   empty if the Go app redirects its internal logging), you can keep 'journal'.
+# - Alternatively, to avoid potential duplicate logging or if the app exclusively uses its file,
+#   you could set StandardOutput=null and StandardError=null here, relying solely on the app's file logging.
+#   However, some startup/shutdown messages from systemd itself might still go to journal.
+
+# --- Restart Behavior ---
+Restart=on-failure
+RestartSec=5s # Time to wait before restarting the service
+
+# --- Process Management ---
+# Type=simple is suitable as the server runs in the foreground.
+Type=simple
+
+# If GoSMTPServer needs to bind to privileged ports (e.g., 25) as a non-root user,
+# you might need to grant capabilities. This can be done via AmbientCapabilities
+# or by using `setcap 'cap_net_bind_service=+ep' /usr/local/bin/gosmtpd`
+# and then ensuring the User has access. AmbientCapabilities is cleaner if supported.
+# Note: Requires systemd version 229 or later for AmbientCapabilities.
+# If User=root, this is not needed, but running as root is not recommended.
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# --- Security Hardening (Optional but Recommended) ---
+# NoNewPrivileges: Ensures the service and its children cannot gain new privileges.
+NoNewPrivileges=true
+
+# PrivateTmp: Provides a private /tmp and /var/tmp.
+PrivateTmp=true
+
+# ProtectSystem: Mounts /usr, /boot, and /etc as read-only for the service.
+# Use "full" for more aggressive protection, "strict" is a good starting point.
+ProtectSystem=strict
+
+# ProtectHome: Makes home directories inaccessible (/home, /root, /run/user).
+# Set to "read-only" if the service needs to read from home directories.
+ProtectHome=true
+
+# ReadWritePaths: Specify paths the service needs write access to.
+# CRITICAL: Adjust these paths to match your `MailDir`, `IncomingFilterQuarantineDir` from config.toml,
+# and the directory of `LogFilePath` if file logging is used by the application.
+# Example:
+# ReadWritePaths=/opt/gosmtpd /var/spool/gosmtpd/queue /var/log/gosmtpd /etc/gosmtpd
+# If MailDir is /opt/gosmtpd/maildata, then /opt/gosmtpd/maildata should be listed.
+# If LogFilePath is /var/log/gosmtpd/server.log, then /var/log/gosmtpd should be listed.
+# Separate paths with spaces.
+# ReadWritePaths=/opt/gosmtpd # For WorkingDirectory if config is there
+# ReadWritePaths=/etc/gosmtpd # For config.toml
+# ReadWritePaths=/var/log/gosmtpd # If LogFilePath is in here
+# ReadWritePaths=/var/spool/mail/gosmtpd_maildir # Example MailDir
+# ReadWritePaths=/var/spool/mail/gosmtpd_quarantine # Example QuarantineDir
+
+# ProtectKernelTunables, ProtectKernelModules, ProtectControlGroups:
+# Further restrict access to kernel interfaces.
+# ProtectKernelTunables=true
+# ProtectKernelModules=true
+# ProtectControlGroups=true
+
+# RestrictAddressFamilies: Restrict to specific address families (e.g., AF_INET, AF_INET6).
+# RestrictAddressFamilies=AF_INET AF_INET6
+
+# PIDFile: GoSMTPServer does not currently create a PID file.
+# If it did, you would specify the path here and possibly change Type to 'forking' or 'notify'.
+# PIDFile=/run/gosmtpd/gosmtpd.pid
+
+[Install]
+WantedBy=multi-user.target
