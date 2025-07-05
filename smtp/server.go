@@ -338,66 +338,101 @@ func HandleConnection(conn net.Conn, cfg *config.Config, clientIP string) {
 				timestamp := time.Now().Format("20060102150405"); randomBytes := make([]byte, 4); _, _ = rand.Read(randomBytes)
 				messageID = fmt.Sprintf("%s_%s", timestamp, hex.EncodeToString(randomBytes))
 
+
 				if cfg.IncomingFilterEnable && cfg.IncomingFilterScriptPath != "" {
-					log.Printf("INFO: [%s] MessageID: %s - Executing incoming mail filter script: %s", clientIP, messageID, cfg.IncomingFilterScriptPath)
+					log.Printf("INFO: [%s] MessageID: %s - Выполнение скрипта фильтра входящей почты: %s", state.clientIP, tempMessageID, cfg.IncomingFilterScriptPath)
+
 					scanOutput := filter.ScanEmailWithScript(
-						finalEmailData, // Pass the current email data
+						emailDataBytes, // Это []byte с полным содержимым письма
 						cfg.IncomingFilterScriptPath,
 						cfg.IncomingFilterScriptArgs,
 						cfg.IncomingFilterScriptTimeoutDuration,
 					)
 
-					if scanOutput.Result == filter.ScanResultError {
-						log.Printf("ERROR: [%s] MessageID: %s - Filter script execution error: %v. Allowing message through (fail-open).", clientIP, messageID, scanOutput.Error)
+					if scanOutput.Error != nil { // Ошибка выполнения самого скрипта (таймаут, не найден и т.д.)
+						log.Printf("ERROR: [%s] MessageID: %s - Ошибка выполнения скрипта фильтра входящей почты: %v. Письмо будет принято без изменений (fail-open).", state.clientIP, tempMessageID, scanOutput.Error)
+						// Продолжаем обычную обработку (помещение в очередь) emailDataBytes
 					} else if scanOutput.Result == filter.ScanResultDetected {
-						log.Printf("INFO: [%s] MessageID: %s - Filter script detected content. Action: %s", clientIP, messageID, cfg.IncomingFilterActionOnDetection)
+						log.Printf("INFO: [%s] MessageID: %s - Скрипт фильтра входящей почты обнаружил проблему. Действие: %s", state.clientIP, tempMessageID, cfg.IncomingFilterActionOnDetection)
+						
 						switch cfg.IncomingFilterActionOnDetection {
 						case "reject":
-							response = strings.TrimSpace(cfg.IncomingFilterRejectMessage) + "\r\n"
-							sendResponse(response)
-							log.Printf("INFO: [%s] MessageID: %s - Rejected due to filter detection.", clientIP, messageID)
-							return // Do not queue
-						case "add_header":
-							if len(scanOutput.HeadersToAdd) > 0 {
-								var newHeaderBlock bytes.Buffer
-								for name, value := range scanOutput.HeadersToAdd { newHeaderBlock.WriteString(fmt.Sprintf("%s: %s\r\n", name, value)) }
-								finalEmailData = append(newHeaderBlock.Bytes(), finalEmailData...)
-								log.Printf("INFO: [%s] MessageID: %s - Added %d headers from filter script.", clientIP, messageID, len(scanOutput.HeadersToAdd))
-							} else if cfg.IncomingFilterHeaderName != "" {
-								 var defaultHeader bytes.Buffer
-								 defaultHeader.WriteString(fmt.Sprintf("%s: Detected\r\n", cfg.IncomingFilterHeaderName))
-								 finalEmailData = append(defaultHeader.Bytes(), finalEmailData...)
-								 log.Printf("INFO: [%s] MessageID: %s - Added default detection header: %s", clientIP, messageID, cfg.IncomingFilterHeaderName)
+							rejectMsg := strings.TrimSpace(cfg.IncomingFilterRejectMessage)
+							if !strings.HasSuffix(rejectMsg, "\r\n") {
+								rejectMsg += "\r\n"
 							}
-						case "quarantine":
-							if cfg.IncomingFilterQuarantineDir == "" {
-								log.Printf("ERROR: [%s] MessageID: %s - Action 'quarantine' but IncomingFilterQuarantineDir not set. Allowing message through (fail-open).", clientIP, messageID)
-							} else {
-								if errMk := os.MkdirAll(cfg.IncomingFilterQuarantineDir, 0750); errMk != nil {
-									log.Printf("ERROR: [%s] MessageID: %s - Cannot create quarantine directory %s: %v. Allowing message through (fail-open).", clientIP, messageID, cfg.IncomingFilterQuarantineDir, errMk)
-								} else {
-									qFilePath := filepath.Join(cfg.IncomingFilterQuarantineDir, messageID+".eml")
-									if errWrite := os.WriteFile(qFilePath, finalEmailData, 0640); errWrite != nil {
-										log.Printf("ERROR: [%s] MessageID: %s - Failed to write to quarantine %s: %v. Allowing (fail-open).", clientIP, messageID, qFilePath, errWrite)
-									} else {
-										log.Printf("INFO: [%s] MessageID: %s - Quarantined to %s due to filter detection.", clientIP, messageID, qFilePath)
-										response = fmt.Sprintf("250 2.0.0 OK: message accepted (queued as %s) - internal handling applied\r\n", messageID)
-										sendResponse(response)
-										state.resetMailState() // Reset for next potential message in session
-										continue // Do not queue for normal delivery
+							// Это сообщение об ошибке будет финальным ответом на команду DATA
+							// sendResponse(writer, rejectMsg) // Если у вас есть такая функция
+							_, _ = writer.WriteString(rejectMsg) // Или напрямую
+							_ = writer.Flush()
+							log.Printf("INFO: [%s] MessageID: %s - Письмо отклонено скриптом фильтра. SMTP Ответ: %s", state.clientIP, tempMessageID, strings.TrimSpace(rejectMsg))
+							// Завершаем обработку этого письма здесь, не помещая его в очередь
+							return // Выход из HandleConnection или из логики обработки DATA
+
+							case "add_header":
+								if len(scanOutput.HeadersToAdd) > 0 {
+									var newHeaderBlock bytes.Buffer
+									for name, value := range scanOutput.HeadersToAdd {
+										newHeaderBlock.WriteString(fmt.Sprintf("%s: %s\r\n", name, value))
 									}
+									// Добавляем новые заголовки в начало []byte письма
+									emailDataBytes = append(newHeaderBlock.Bytes(), emailDataBytes...)
+									log.Printf("INFO: [%s] MessageID: %s - Добавлено %d заголовков от скрипта фильтра.", state.clientIP, tempMessageID, len(scanOutput.HeadersToAdd))
+								} else if cfg.IncomingFilterHeaderName != "" { // Скрипт обнаружил, но не дал заголовков; добавляем стандартный
+									var defaultHeader bytes.Buffer
+									defaultHeader.WriteString(fmt.Sprintf("%s: Detected by filter\r\n", cfg.IncomingFilterHeaderName))
+									emailDataBytes = append(defaultHeader.Bytes(), emailDataBytes...)
+									log.Printf("INFO: [%s] MessageID: %s - Добавлен стандартный заголовок обнаружения: %s", state.clientIP, tempMessageID, cfg.IncomingFilterHeaderName)
 								}
+								// Продолжаем обычную обработку (помещение в очередь) измененного emailDataBytes
+								break // Выход из switch, далее письмо пойдет в очередь
+
+							case "quarantine":
+								if cfg.IncomingFilterQuarantineDir == "" {
+									log.Printf("ERROR: [%s] MessageID: %s - Действие 'quarantine', но IncomingFilterQuarantineDir не настроен. Письмо будет принято в основную очередь (fail-open).", state.clientIP, tempMessageID)
+									break // Выход из switch, далее письмо пойдет в очередь
+								}
+								
+								err := os.MkdirAll(cfg.IncomingFilterQuarantineDir, 0750)
+								if err != nil {
+									log.Printf("ERROR: [%s] MessageID: %s - Не удалось создать каталог карантина %s: %v. Письмо будет принято в основную очередь (fail-open).", state.clientIP, tempMessageID, cfg.IncomingFilterQuarantineDir, err)
+									break // Выход из switch, далее письмо пойдет в очередь
+								}
+								
+								quarantineFilePath := filepath.Join(cfg.IncomingFilterQuarantineDir, tempMessageID+".eml")
+								err = os.WriteFile(quarantineFilePath, emailDataBytes, 0640)
+								if err != nil {
+									log.Printf("ERROR: [%s] MessageID: %s - Не удалось записать письмо в каталог карантина %s: %v. Письмо будет принято в основную очередь (fail-open).", state.clientIP, tempMessageID, quarantineFilePath, err)
+									break // Выход из switch, далее письмо пойдет в очередь
+								}
+								
+								log.Printf("INFO: [%s] MessageID: %s - Письмо помещено в карантин %s из-за обнаружения фильтром.", state.clientIP, tempMessageID, quarantineFilePath)
+								// Сервер принял письмо, поэтому отвечаем 250 OK.
+								// Но не помещаем его в обычную очередь для доставки.
+								successMsg := fmt.Sprintf("250 2.0.0 OK: message accepted for delivery (queued as %s)\r\n", tempMessageID)
+								// sendResponse(writer, successMsg) // Если у вас есть такая функция
+								_, _ = writer.WriteString(successMsg) // Или напрямую
+								_ = writer.Flush()
+								// Завершаем обработку этого письма здесь
+								return // Выход из HandleConnection или из логики обработки DATA
+
+							default: // Не должно произойти при корректной конфигурации
+								log.Printf("WARN: [%s] MessageID: %s - Неизвестное действие фильтра '%s'. Письмо будет принято без изменений.", state.clientIP, tempMessageID, cfg.IncomingFilterActionOnDetection)
+								// Продолжаем обычную обработку (помещение в очередь) emailDataBytes
+								break // Выход из switch, далее письмо пойдет в очередь
 							}
-						default: log.Printf("WARN: [%s] MessageID: %s - Unknown filter action '%s'. Allowing through.", clientIP, messageID, cfg.IncomingFilterActionOnDetection)
-						}
-					} else { // ScanResultClean
-						log.Printf("INFO: [%s] MessageID: %s - Filter script found content to be clean.", clientIP, messageID)
-						if len(scanOutput.HeadersToAdd) > 0 { // Add headers even if clean (e.g. X-Spam-Score)
+					} else { // scanOutput.Result == filter.ScanResultClean
+						log.Printf("INFO: [%s] MessageID: %s - Скрипт фильтра входящей почты счел содержимое чистым.", state.clientIP, tempMessageID)
+						// Добавляем заголовки, даже если чисто, если скрипт их предоставил (например, X-Spam-Status: No)
+						if len(scanOutput.HeadersToAdd) > 0 {
 							var newHeaderBlock bytes.Buffer
-							for name, value := range scanOutput.HeadersToAdd { newHeaderBlock.WriteString(fmt.Sprintf("%s: %s\r\n", name, value)) }
-							finalEmailData = append(newHeaderBlock.Bytes(), finalEmailData...)
-							log.Printf("INFO: [%s] MessageID: %s - Added %d headers from (clean) filter script.", clientIP, messageID, len(scanOutput.HeadersToAdd))
+							for name, value := range scanOutput.HeadersToAdd {
+								newHeaderBlock.WriteString(fmt.Sprintf("%s: %s\r\n", name, value))
+							}
+							emailDataBytes = append(newHeaderBlock.Bytes(), emailDataBytes...)
+							log.Printf("INFO: [%s] MessageID: %s - Добавлено %d заголовков от (чистого) скрипта фильтра.", state.clientIP, tempMessageID, len(scanOutput.HeadersToAdd))
 						}
+						// Продолжаем обычную обработку (помещение в очередь) emailDataBytes (возможно, с новыми заголовками)
 					}
 				}
 				// Proceed to queue with finalEmailData
